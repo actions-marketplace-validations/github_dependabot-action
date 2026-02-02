@@ -20,7 +20,7 @@ jobs:
     steps:
       - name: Fetch dependabot metadata
         id: dependabot-metadata
-        uses: dependabot/fetch-metadata@08eff52bf64351f401fb50d4972fa95b9f2c2d1b # v2.4.0
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2.5.0
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
@@ -32,7 +32,7 @@ jobs:
     steps:
       - name: Generate token
         id: generate_token
-        uses: actions/create-github-app-token@7e473efe3cb98aa54f8d4bac15400b15fad77d94 # v2.2.0
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
         with:
           app-id: ${{ secrets.DEPENDABOT_ACTION_TOKEN_AUTOMATION_CLIENT_ID }}
           private-key: ${{ secrets.DEPENDABOT_ACTION_TOKEN_AUTOMATION_PRIVATE_KEY }}
