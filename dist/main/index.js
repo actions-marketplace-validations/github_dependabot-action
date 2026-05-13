@@ -26050,6 +26050,8 @@ base64.test = function test(string) {
 
 module.exports = codegen;
 
+var reservedRe = /^(?:do|if|in|for|let|new|try|var|case|else|enum|eval|false|null|this|true|void|with|break|catch|class|const|super|throw|while|yield|delete|export|import|public|return|static|switch|typeof|default|extends|finally|package|private|continue|debugger|function|arguments|interface|protected|implements|instanceof)$/;
+
 /**
  * Begins generating a function.
  * @memberof util
@@ -26124,7 +26126,7 @@ function codegen(functionParams, functionName) {
     }
 
     function toString(functionNameOverride) {
-        return "function " + (functionNameOverride || functionName || "") + "(" + (functionParams && functionParams.join(",") || "") + "){\n  " + body.join("\n  ") + "\n}";
+        return "function " + safeFunctionName(functionNameOverride || functionName) + "(" + (functionParams && functionParams.join(",") || "") + "){\n  " + body.join("\n  ") + "\n}";
     }
 
     Codegen.toString = toString;
@@ -26146,6 +26148,17 @@ function codegen(functionParams, functionName) {
  * @type {boolean}
  */
 codegen.verbose = false;
+
+function safeFunctionName(name) {
+    if (!name)
+        return "";
+    name = String(name).replace(/[^\w$]/g, "");
+    if (!name)
+        return "";
+    if (/^\d/.test(name))
+        name = "_" + name;
+    return reservedRe.test(name) ? name + "_" : name;
+}
 
 
 /***/ }),
@@ -26714,13 +26727,31 @@ module.exports = inquire;
  * @returns {?Object} Required module if available and not empty, otherwise `null`
  */
 function inquire(moduleName) {
-    try {
-        var mod = eval("quire".replace(/^/,"re"))(moduleName); // eslint-disable-line no-eval
-        if (mod && (mod.length || Object.keys(mod).length))
-            return mod;
-    } catch (e) {} // eslint-disable-line no-empty
+  try {
+    if (false) {}
+    var mod = require(moduleName);
+    if (mod && (mod.length || Object.keys(mod).length)) return mod;
     return null;
+  } catch (err) {
+    // ignore
+    return null;
+  }
 }
+
+/*
+// maybe worth a shot to prevent renaming issues:
+// see: https://github.com/webpack/webpack/blob/master/lib/dependencies/CommonJsRequireDependencyParserPlugin.js
+// triggers on:
+// - expression require.cache
+// - expression require (???)
+// - call require
+// - call require:commonjs:item
+// - call require:commonjs:context
+
+Object.defineProperty(Function.prototype, "__self", { get: function() { return this; } });
+var r = require.__self;
+delete Function.prototype.__self;
+*/
 
 
 /***/ }),
@@ -26865,7 +26896,8 @@ function pool(alloc, slice, size) {
  * @memberof util
  * @namespace
  */
-var utf8 = exports;
+var utf8 = exports,
+    replacementChar = "\ufffd";
 
 /**
  * Calculates the UTF8 byte length of a string.
@@ -26898,36 +26930,34 @@ utf8.length = function utf8_length(string) {
  * @returns {string} String read
  */
 utf8.read = function utf8_read(buffer, start, end) {
-    var len = end - start;
-    if (len < 1)
+    if (end - start < 1) {
         return "";
-    var parts = null,
-        chunk = [],
-        i = 0, // char offset
-        t;     // temporary
-    while (start < end) {
-        t = buffer[start++];
-        if (t < 128)
-            chunk[i++] = t;
-        else if (t > 191 && t < 224)
-            chunk[i++] = (t & 31) << 6 | buffer[start++] & 63;
-        else if (t > 239 && t < 365) {
-            t = ((t & 7) << 18 | (buffer[start++] & 63) << 12 | (buffer[start++] & 63) << 6 | buffer[start++] & 63) - 0x10000;
-            chunk[i++] = 0xD800 + (t >> 10);
-            chunk[i++] = 0xDC00 + (t & 1023);
-        } else
-            chunk[i++] = (t & 15) << 12 | (buffer[start++] & 63) << 6 | buffer[start++] & 63;
-        if (i > 8191) {
-            (parts || (parts = [])).push(String.fromCharCode.apply(String, chunk));
-            i = 0;
+    }
+
+    var str = "";
+    for (var i = start; i < end;) {
+        var t = buffer[i++];
+        if (t <= 0x7F) {
+            str += String.fromCharCode(t);
+        } else if (t >= 0xC0 && t < 0xE0) {
+            var c2 = (t & 0x1F) << 6 | buffer[i++] & 0x3F;
+            str += c2 >= 0x80 ? String.fromCharCode(c2) : replacementChar;
+        } else if (t >= 0xE0 && t < 0xF0) {
+            var c3 = (t & 0xF) << 12 | (buffer[i++] & 0x3F) << 6 | buffer[i++] & 0x3F;
+            str += c3 >= 0x800 ? String.fromCharCode(c3) : replacementChar;
+        } else if (t >= 0xF0) {
+            var t2 = (t & 7) << 18 | (buffer[i++] & 0x3F) << 12 | (buffer[i++] & 0x3F) << 6 | buffer[i++] & 0x3F;
+            if (t2 < 0x10000 || t2 > 0x10FFFF)
+                str += replacementChar;
+            else {
+                t2 -= 0x10000;
+                str += String.fromCharCode(0xD800 + (t2 >> 10));
+                str += String.fromCharCode(0xDC00 + (t2 & 0x3FF));
+            }
         }
     }
-    if (parts) {
-        if (i)
-            parts.push(String.fromCharCode.apply(String, chunk.slice(0, i)));
-        return parts.join("");
-    }
-    return String.fromCharCode.apply(String, chunk.slice(0, i));
+
+    return str;
 };
 
 /**
@@ -30525,14 +30555,14 @@ Modem.prototype.dial = function (options, callback) {
     } else {
       data = options.file;
     }
-    optionsf.headers['Content-Type'] = 'application/tar';
+    optionsf.headers['Content-Type'] = options?.headers?.['Content-Type'] ?? 'application/tar';
   } else if (opts && options.method === 'POST') {
     data = JSON.stringify(opts._body || opts);
     if (options.allowEmpty) {
-      optionsf.headers['Content-Type'] = 'application/json';
+      optionsf.headers['Content-Type'] = options?.headers?.['Content-Type'] ?? 'application/json';
     } else {
       if (data !== '{}' && data !== '""') {
-        optionsf.headers['Content-Type'] = 'application/json';
+        optionsf.headers['Content-Type'] = options?.headers?.['Content-Type'] ?? 'application/json';
       } else {
         data = undefined;
       }
@@ -30595,7 +30625,13 @@ Modem.prototype.buildRequest = function (options, context, data, callback) {
     protocol: 'http:',
   }) : options;
 
-  var req = http[self.protocol === 'ssh' ? 'http' : self.protocol].request(opts, function () { });
+  var req = null;
+  try {
+    req = http[self.protocol === 'ssh' ? 'http' : self.protocol].request(opts, function () { });
+  } catch (e) {
+    callback(e);
+    return;
+  }
 
   debug('Sending: %s', util.inspect(options, {
     showHidden: true,
@@ -30754,31 +30790,55 @@ Modem.prototype.buildPayload = function (err, isStream, statusCodes, openStdin, 
 };
 
 Modem.prototype.demuxStream = function (streama, stdout, stderr) {
-  var nextDataType = null;
-  var nextDataLength = null;
+  var pendingStreamType = null;
+  var pendingDataLength = null;
   var buffer = Buffer.from('');
+  
   function processData(data) {
     if (data) {
       buffer = Buffer.concat([buffer, data]);
     }
-    if (!nextDataType) {
+    if (pendingStreamType === null) {
       if (buffer.length >= 8) {
         var header = bufferSlice(8);
-        nextDataType = header.readUInt8(0);
-        nextDataLength = header.readUInt32BE(4);
+        var streamType = header.readUInt8(0);
+        var dataLength = header.readUInt32BE(4);
+
+        // Validate stream type per Docker multiplex protocol:
+        // 0 = stdin, 1 = stdout, 2 = stderr
+        if (streamType !== 0 && streamType !== 1 && streamType !== 2) {
+          // Invalid header — stream is likely not multiplexed (e.g. TTY mode)
+          // or has become misaligned. Write the entire buffer as stdout
+          // and stop trying to demux.
+          var remaining = Buffer.concat([header, buffer]);
+          stdout.write(remaining);
+          buffer = Buffer.from('');
+          pendingStreamType = null;
+          pendingDataLength = null;
+          // Switch to raw passthrough for the rest of the stream
+          streama.removeListener('data', processData);
+          streama.on('data', function(chunk) {
+            stdout.write(chunk);
+          });
+          return;
+        }
+
+        pendingStreamType = streamType;
+        pendingDataLength = dataLength;
         // It's possible we got a "data" that contains multiple messages
         // Process the next one
         processData();
       }
     } else {
-      if (buffer.length >= nextDataLength) {
-        var content = bufferSlice(nextDataLength);
-        if (nextDataType === 1) {
+      if (buffer.length >= pendingDataLength) {
+        var content = bufferSlice(pendingDataLength);
+        if (pendingStreamType === 1) {
           stdout.write(content);
         } else {
           stderr.write(content);
         }
-        nextDataType = null;
+        pendingStreamType = null;
+        pendingDataLength = null;
         // It's possible we got a "data" that contains multiple messages
         // Process the next one
         processData();
@@ -30952,6 +31012,255 @@ module.exports.parseJSON = function(s) {
   } catch (e) {
     return null;
   }
+};
+
+
+/***/ }),
+
+/***/ 7056:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+var protobuf = __nccwpck_require__(3928);
+var path = __nccwpck_require__(6928);
+
+// Constants
+var BUILDKIT_TRACE_ID = "moby.buildkit.trace";
+var BUILDKIT_IMAGE_ID = "moby.image.id";
+var PROTO_TYPE = "moby.buildkit.v1.StatusResponse";
+var ENCODING_UTF8 = "utf8";
+var ENCODING_BASE64 = "base64";
+
+var StatusResponse;
+
+// Load the protobuf schema
+function loadProto() {
+  if (StatusResponse) return StatusResponse;
+  
+  var root = protobuf.loadSync(
+    __nccwpck_require__.ab + "buildkit_status.proto"
+  );
+  StatusResponse = root.lookupType(PROTO_TYPE);
+  return StatusResponse;
+}
+
+/**
+ * Decodes a BuildKit trace message
+ * @param {string} base64Data - Base64-encoded protobuf data from aux field
+ * @returns {Object} Decoded status response with vertexes, logs, etc.
+ */
+function decodeBuildKitStatus(base64Data) {
+  var StatusResponse = loadProto();
+  
+  // Handle empty messages
+  if (!base64Data || base64Data.length === 0) {
+    return {
+      vertexes: [],
+      statuses: [],
+      logs: [],
+      warnings: []
+    };
+  }
+  
+  var buffer = Buffer.from(base64Data, ENCODING_BASE64);
+  var message = StatusResponse.decode(buffer);
+  return StatusResponse.toObject(message, {
+    longs: String,
+    enums: String,
+    bytes: String,
+    defaults: true
+  });
+}
+
+/**
+ * Formats BuildKit status into human-readable text
+ * @param {Object} status - Decoded status response
+ * @returns {string[]} Array of human-readable log lines
+ */
+function formatBuildKitStatus(status) {
+  var lines = [];
+  
+  // Process vertexes (build steps)
+  if (status.vertexes && status.vertexes.length > 0) {
+    status.vertexes.forEach(function(vertex) {
+      if (vertex.name && vertex.started && !vertex.completed) {
+        lines.push("[" + vertex.digest.substring(0, 12) + "] " + vertex.name);
+      }
+      if (vertex.error) {
+        lines.push("ERROR: " + vertex.error);
+      }
+      if (vertex.completed && vertex.cached) {
+        lines.push("CACHED: " + vertex.name);
+      }
+    });
+  }
+  
+  // Process logs (command output)
+  if (status.logs && status.logs.length > 0) {
+    status.logs.forEach(function(log) {
+      var msg = Buffer.from(log.msg).toString(ENCODING_UTF8);
+      if (msg.trim()) {
+        lines.push(msg.trimEnd());
+      }
+    });
+  }
+  
+  // Process status updates (progress)
+  if (status.statuses && status.statuses.length > 0) {
+    status.statuses.forEach(function(s) {
+      if (s.name && s.total > 0) {
+        var percent = Math.floor((s.current / s.total) * 100);
+        lines.push(s.name + ": " + percent + "% (" + s.current + "/" + s.total + ")");
+      }
+    });
+  }
+  
+  // Process warnings
+  if (status.warnings && status.warnings.length > 0) {
+    status.warnings.forEach(function(warning) {
+      var msg = Buffer.from(warning.short).toString(ENCODING_UTF8);
+      lines.push("WARNING: " + msg);
+    });
+  }
+  
+  return lines;
+}
+
+/**
+ * Parse a BuildKit stream line and extract human-readable logs
+ * @param {string} line - JSON line from build stream
+ * @returns {Object} { isBuildKit: boolean, logs: string[], raw: Object }
+ */
+function parseBuildKitLine(line) {
+  try {
+    var json = JSON.parse(line);
+    
+    // Check if it's a BuildKit trace message
+    if (json.id === BUILDKIT_TRACE_ID && json.aux !== undefined) {
+      var status = decodeBuildKitStatus(json.aux);
+      var logs = formatBuildKitStatus(status);
+      
+      return {
+        isBuildKit: true,
+        logs: logs,
+        raw: status
+      };
+    }
+    
+    // Check if it's the final image ID
+    if (json.id === BUILDKIT_IMAGE_ID && json.aux && json.aux.ID) {
+      return {
+        isBuildKit: true,
+        logs: ["Built image: " + json.aux.ID],
+        raw: json.aux
+      };
+    }
+    
+    // Not a BuildKit message
+    return {
+      isBuildKit: false,
+      logs: [],
+      raw: json
+    };
+  } catch (e) {
+    return {
+      isBuildKit: false,
+      logs: [],
+      raw: null,
+      error: e.message
+    };
+  }
+}
+
+/**
+ * Follow progress of a stream, automatically handling both BuildKit and regular output.
+ * This provides the same ergonomics as modem.followProgress but decodes BuildKit logs.
+ * 
+ * @param {Stream} stream - Stream from buildImage(), pull(), push(), etc.
+ * @param {Function} onFinished - Called when stream ends: (err, output) => void
+ * @param {Function} onProgress - Called for each log event: (event) => void
+ * @returns {void}
+ */
+function followProgress(stream, onFinished, onProgress) {
+  var buffer = '';
+  var output = [];
+  var finished = false;
+
+  stream.on('data', onStreamEvent);
+  stream.on('error', onStreamError);
+  stream.on('end', onStreamEnd);
+  stream.on('close', onStreamEnd);
+
+  function onStreamEvent(data) {
+    buffer += data.toString();
+    
+    // Process complete lines
+    var lines = buffer.split('\n');
+    buffer = lines.pop(); // Save incomplete line
+    
+    lines.forEach(function(line) {
+      if (!line.trim()) return;
+      
+      processLine(line);
+    });
+  }
+
+  function processLine(line) {
+    try {
+      // Try to parse as BuildKit or regular Docker output
+      var result = parseBuildKitLine(line);
+      
+      if (result.isBuildKit) {
+        // BuildKit message - create events from decoded logs
+        result.logs.forEach(function(log) {
+          var event = { stream: log + '\n' };
+          output.push(event);
+          if (onProgress) onProgress(event);
+        });
+      } else if (result.raw) {
+        // Regular Docker message
+        output.push(result.raw);
+        if (onProgress) onProgress(result.raw);
+      }
+    } catch (e) {
+      // If parsing fails, try plain JSON
+      try {
+        var json = JSON.parse(line);
+        output.push(json);
+        if (onProgress) onProgress(json);
+      } catch (e2) {
+        // Ignore parse errors
+      }
+    }
+  }
+
+  function onStreamError(err) {
+    finished = true;
+    stream.removeListener('data', onStreamEvent);
+    stream.removeListener('error', onStreamError);
+    stream.removeListener('end', onStreamEnd);
+    stream.removeListener('close', onStreamEnd);
+    if (onFinished) onFinished(err, output);
+  }
+
+  function onStreamEnd() {
+    if (finished) return;
+    finished = true;
+    
+    // Process any remaining data in buffer
+    if (buffer.trim()) {
+      processLine(buffer);
+    }
+    
+    stream.removeListener('data', onStreamEvent);
+    stream.removeListener('error', onStreamError);
+    stream.removeListener('end', onStreamEnd);
+    stream.removeListener('close', onStreamEnd);
+    if (onFinished) onFinished(null, output);
+  }
+}
+
+module.exports = {
+  followProgress: followProgress
 };
 
 
@@ -32529,6 +32838,30 @@ Docker.prototype.buildImage = function(file, opts, callback) {
   } else {
     dialWithSession(callback);
   }
+};
+
+/**
+ * Follow progress of a stream operation (build, pull, push, etc.) with automatic
+ * BuildKit decoding.
+ * 
+ * This method works identically to docker.modem.followProgress() but additionally
+ * decodes BuildKit v2 build output. BuildKit emits base64-encoded protobuf messages
+ * which this method transparently decodes into human-readable log events.
+ * 
+ * Use this instead of docker.modem.followProgress() when:
+ * - You're using BuildKit builds (version: "2")
+ * - You want a single API that handles both regular and BuildKit output
+ * 
+ * For non-BuildKit streams (pull, push, regular builds), behavior is identical
+ * to docker.modem.followProgress().
+ * 
+ * @param {Stream} stream - Stream from buildImage(), pull(), push(), etc.
+ * @param {Function} onFinished - Called when stream ends: (err, output) => void
+ * @param {Function} onProgress - Optional callback for each event: (event) => void
+ */
+Docker.prototype.followProgress = function(stream, onFinished, onProgress) {
+  var buildkit = __nccwpck_require__(7056);
+  return buildkit.followProgress(stream, onFinished, onProgress);
 };
 
 /**
@@ -36026,6 +36359,14 @@ module.exports = eos;
 
 /***/ }),
 
+/***/ 9580:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+module.exports = __nccwpck_require__(4434)
+
+
+/***/ }),
+
 /***/ 3587:
 /***/ ((module) => {
 
@@ -36114,11 +36455,13 @@ module.exports = class FastFIFO {
   }
 
   peek () {
-    return this.tail.peek()
+    const val = this.tail.peek()
+    if (val === undefined && this.tail.next) return this.tail.next.peek()
+    return val
   }
 
   isEmpty () {
-    return this.head.isEmpty()
+    return this.length === 0
   }
 }
 
@@ -42398,6 +42741,10 @@ function crypto_sign_open(m, sm, n, pk) {
     return -1;
   }
 
+  if(!_isCanonicalSignatureScalar(sm, 32)) {
+    return -1;
+  }
+
   for(i = 0; i < n; ++i) {
     m[i] = sm[i];
   }
@@ -42425,6 +42772,21 @@ function crypto_sign_open(m, sm, n, pk) {
   }
   mlen = n;
   return mlen;
+}
+
+function _isCanonicalSignatureScalar(bytes, offset) {
+  var i;
+  // Compare little-endian scalar S against group order L and require S < L.
+  for(i = 31; i >= 0; --i) {
+    if(bytes[offset + i] < L[i]) {
+      return true;
+    }
+    if(bytes[offset + i] > L[i]) {
+      return false;
+    }
+  }
+  // S == L is non-canonical.
+  return false;
 }
 
 function modL(r, x) {
@@ -43434,10 +43796,12 @@ if(typeof(navigator) === 'undefined')
 } else if(j_lm && (navigator.appName == "Microsoft Internet Explorer")) {
   BigInteger.prototype.am = am2;
   dbits = 30;
-} else if(j_lm && (navigator.appName != "Netscape")) {
+}
+else if(j_lm && (navigator.appName != "Netscape")) {
   BigInteger.prototype.am = am1;
   dbits = 26;
-} else { // Mozilla/Netscape seems to prefer am3
+}
+else { // Mozilla/Netscape seems to prefer am3
   BigInteger.prototype.am = am3;
   dbits = 28;
 }
@@ -43512,7 +43876,8 @@ function bnpFromString(s,b) {
     else if(sh+k > this.DB) {
       this.data[this.t-1] |= (x&((1<<(this.DB-sh))-1))<<sh;
       this.data[this.t++] = (x>>(this.DB-sh));
-    } else
+    }
+    else
       this.data[this.t-1] |= x<<sh;
     sh += k;
     if(sh >= this.DB) sh -= this.DB;
@@ -43549,7 +43914,8 @@ function bnToString(b) {
       if(p < k) {
         d = (this.data[i]&((1<<p)-1))<<(k-p);
         d |= this.data[--i]>>(p+=this.DB-k);
-      } else {
+      }
+      else {
         d = (this.data[i]>>(p-=k))&km;
         if(p <= 0) { p += this.DB; --i; }
       }
@@ -43661,7 +44027,8 @@ function bnpSubTo(a,r) {
       c >>= this.DB;
     }
     c += this.s;
-  } else {
+  }
+  else {
     c += this.s;
     while(i < a.t) {
       c -= a.data[i];
@@ -43721,7 +44088,8 @@ function bnpDivRemTo(m,q,r) {
   if(r == null) r = nbi();
   var y = nbi(), ts = this.s, ms = m.s;
   var nsh = this.DB-nbits(pm.data[pm.t-1]);	// normalize modulus
-  if(nsh > 0) { pm.lShiftTo(nsh,y); pt.lShiftTo(nsh,r); } else { pm.copyTo(y); pt.copyTo(r); }
+  if(nsh > 0) { pm.lShiftTo(nsh,y); pt.lShiftTo(nsh,r); }
+  else { pm.copyTo(y); pt.copyTo(r); }
   var ys = y.t;
   var y0 = y.data[ys-1];
   if(y0 == 0) return;
@@ -43918,326 +44286,335 @@ BigInteger.ONE = nbv(1);
 
 // jsbn2 lib
 
-//Copyright (c) 2005-2009  Tom Wu
-//All Rights Reserved.
-//See "LICENSE" for details (See jsbn.js for LICENSE).
+// Copyright (c) 2005-2009  Tom Wu
+// All Rights Reserved.
+// See "LICENSE" for details (See jsbn.js for LICENSE).
 
-//Extended JavaScript BN functions, required for RSA private ops.
+// Extended JavaScript BN functions, required for RSA private ops.
 
-//Version 1.1: new BigInteger("0", 10) returns "proper" zero
+// Version 1.1: new BigInteger("0", 10) returns "proper" zero
+// Version 1.2: square() API, isProbablePrime fix
 
-//(public)
+// (public)
 function bnClone() { var r = nbi(); this.copyTo(r); return r; }
 
-//(public) return value as integer
+// (public) return value as integer
 function bnIntValue() {
-if(this.s < 0) {
- if(this.t == 1) return this.data[0]-this.DV;
- else if(this.t == 0) return -1;
-} else if(this.t == 1) return this.data[0];
-else if(this.t == 0) return 0;
-// assumes 16 < DB < 32
-return ((this.data[1]&((1<<(32-this.DB))-1))<<this.DB)|this.data[0];
+  if(this.s < 0) {
+    if(this.t == 1) return this.data[0]-this.DV;
+    else if(this.t == 0) return -1;
+  }
+  else if(this.t == 1) return this.data[0];
+  else if(this.t == 0) return 0;
+  // assumes 16 < DB < 32
+  return ((this.data[1]&((1<<(32-this.DB))-1))<<this.DB)|this.data[0];
 }
 
-//(public) return value as byte
+// (public) return value as byte
 function bnByteValue() { return (this.t==0)?this.s:(this.data[0]<<24)>>24; }
 
-//(public) return value as short (assumes DB>=16)
+// (public) return value as short (assumes DB>=16)
 function bnShortValue() { return (this.t==0)?this.s:(this.data[0]<<16)>>16; }
 
-//(protected) return x s.t. r^x < DV
+// (protected) return x s.t. r^x < DV
 function bnpChunkSize(r) { return Math.floor(Math.LN2*this.DB/Math.log(r)); }
 
-//(public) 0 if this == 0, 1 if this > 0
+// (public) 0 if this == 0, 1 if this > 0
 function bnSigNum() {
-if(this.s < 0) return -1;
-else if(this.t <= 0 || (this.t == 1 && this.data[0] <= 0)) return 0;
-else return 1;
+  if(this.s < 0) return -1;
+  else if(this.t <= 0 || (this.t == 1 && this.data[0] <= 0)) return 0;
+  else return 1;
 }
 
-//(protected) convert to radix string
+// (protected) convert to radix string
 function bnpToRadix(b) {
-if(b == null) b = 10;
-if(this.signum() == 0 || b < 2 || b > 36) return "0";
-var cs = this.chunkSize(b);
-var a = Math.pow(b,cs);
-var d = nbv(a), y = nbi(), z = nbi(), r = "";
-this.divRemTo(d,y,z);
-while(y.signum() > 0) {
- r = (a+z.intValue()).toString(b).substr(1) + r;
- y.divRemTo(d,y,z);
-}
-return z.intValue().toString(b) + r;
+  if(b == null) b = 10;
+  if(this.signum() == 0 || b < 2 || b > 36) return "0";
+  var cs = this.chunkSize(b);
+  var a = Math.pow(b,cs);
+  var d = nbv(a), y = nbi(), z = nbi(), r = "";
+  this.divRemTo(d,y,z);
+  while(y.signum() > 0) {
+    r = (a+z.intValue()).toString(b).substr(1) + r;
+    y.divRemTo(d,y,z);
+  }
+  return z.intValue().toString(b) + r;
 }
 
-//(protected) convert from radix string
+// (protected) convert from radix string
 function bnpFromRadix(s,b) {
-this.fromInt(0);
-if(b == null) b = 10;
-var cs = this.chunkSize(b);
-var d = Math.pow(b,cs), mi = false, j = 0, w = 0;
-for(var i = 0; i < s.length; ++i) {
- var x = intAt(s,i);
- if(x < 0) {
-   if(s.charAt(i) == "-" && this.signum() == 0) mi = true;
-   continue;
- }
- w = b*w+x;
- if(++j >= cs) {
-   this.dMultiply(d);
-   this.dAddOffset(w,0);
-   j = 0;
-   w = 0;
- }
-}
-if(j > 0) {
- this.dMultiply(Math.pow(b,j));
- this.dAddOffset(w,0);
-}
-if(mi) BigInteger.ZERO.subTo(this,this);
+  this.fromInt(0);
+  if(b == null) b = 10;
+  var cs = this.chunkSize(b);
+  var d = Math.pow(b,cs), mi = false, j = 0, w = 0;
+  for(var i = 0; i < s.length; ++i) {
+    var x = intAt(s,i);
+    if(x < 0) {
+      if(s.charAt(i) == "-" && this.signum() == 0) mi = true;
+      continue;
+    }
+    w = b*w+x;
+    if(++j >= cs) {
+      this.dMultiply(d);
+      this.dAddOffset(w,0);
+      j = 0;
+      w = 0;
+    }
+  }
+  if(j > 0) {
+    this.dMultiply(Math.pow(b,j));
+    this.dAddOffset(w,0);
+  }
+  if(mi) BigInteger.ZERO.subTo(this,this);
 }
 
-//(protected) alternate constructor
+// (protected) alternate constructor
 function bnpFromNumber(a,b,c) {
-if("number" == typeof b) {
- // new BigInteger(int,int,RNG)
- if(a < 2) this.fromInt(1);
- else {
-   this.fromNumber(a,c);
-   if(!this.testBit(a-1))  // force MSB set
-     this.bitwiseTo(BigInteger.ONE.shiftLeft(a-1),op_or,this);
-   if(this.isEven()) this.dAddOffset(1,0); // force odd
-   while(!this.isProbablePrime(b)) {
-     this.dAddOffset(2,0);
-     if(this.bitLength() > a) this.subTo(BigInteger.ONE.shiftLeft(a-1),this);
-   }
- }
-} else {
- // new BigInteger(int,RNG)
- var x = new Array(), t = a&7;
- x.length = (a>>3)+1;
- b.nextBytes(x);
- if(t > 0) x[0] &= ((1<<t)-1); else x[0] = 0;
- this.fromString(x,256);
-}
+  if("number" == typeof b) {
+    // new BigInteger(int,int,RNG)
+    if(a < 2) this.fromInt(1);
+    else {
+      this.fromNumber(a,c);
+      if(!this.testBit(a-1))	// force MSB set
+        this.bitwiseTo(BigInteger.ONE.shiftLeft(a-1),op_or,this);
+      if(this.isEven()) this.dAddOffset(1,0); // force odd
+      while(!this.isProbablePrime(b)) {
+        this.dAddOffset(2,0);
+        if(this.bitLength() > a) this.subTo(BigInteger.ONE.shiftLeft(a-1),this);
+      }
+    }
+  }
+  else {
+    // new BigInteger(int,RNG)
+    var x = new Array(), t = a&7;
+    x.length = (a>>3)+1;
+    b.nextBytes(x);
+    if(t > 0) x[0] &= ((1<<t)-1); else x[0] = 0;
+    this.fromString(x,256);
+  }
 }
 
-//(public) convert to bigendian byte array
+// (public) convert to bigendian byte array
 function bnToByteArray() {
-var i = this.t, r = new Array();
-r[0] = this.s;
-var p = this.DB-(i*this.DB)%8, d, k = 0;
-if(i-- > 0) {
- if(p < this.DB && (d = this.data[i]>>p) != (this.s&this.DM)>>p)
-   r[k++] = d|(this.s<<(this.DB-p));
- while(i >= 0) {
-   if(p < 8) {
-     d = (this.data[i]&((1<<p)-1))<<(8-p);
-     d |= this.data[--i]>>(p+=this.DB-8);
-   } else {
-     d = (this.data[i]>>(p-=8))&0xff;
-     if(p <= 0) { p += this.DB; --i; }
-   }
-   if((d&0x80) != 0) d |= -256;
-   if(k == 0 && (this.s&0x80) != (d&0x80)) ++k;
-   if(k > 0 || d != this.s) r[k++] = d;
- }
-}
-return r;
+  var i = this.t, r = new Array();
+  r[0] = this.s;
+  var p = this.DB-(i*this.DB)%8, d, k = 0;
+  if(i-- > 0) {
+    if(p < this.DB && (d = this.data[i]>>p) != (this.s&this.DM)>>p)
+      r[k++] = d|(this.s<<(this.DB-p));
+    while(i >= 0) {
+      if(p < 8) {
+        d = (this.data[i]&((1<<p)-1))<<(8-p);
+        d |= this.data[--i]>>(p+=this.DB-8);
+      }
+      else {
+        d = (this.data[i]>>(p-=8))&0xff;
+        if(p <= 0) { p += this.DB; --i; }
+      }
+      if((d&0x80) != 0) d |= -256;
+      if(k == 0 && (this.s&0x80) != (d&0x80)) ++k;
+      if(k > 0 || d != this.s) r[k++] = d;
+    }
+  }
+  return r;
 }
 
 function bnEquals(a) { return(this.compareTo(a)==0); }
 function bnMin(a) { return(this.compareTo(a)<0)?this:a; }
 function bnMax(a) { return(this.compareTo(a)>0)?this:a; }
 
-//(protected) r = this op a (bitwise)
+// (protected) r = this op a (bitwise)
 function bnpBitwiseTo(a,op,r) {
-var i, f, m = Math.min(a.t,this.t);
-for(i = 0; i < m; ++i) r.data[i] = op(this.data[i],a.data[i]);
-if(a.t < this.t) {
- f = a.s&this.DM;
- for(i = m; i < this.t; ++i) r.data[i] = op(this.data[i],f);
- r.t = this.t;
-} else {
- f = this.s&this.DM;
- for(i = m; i < a.t; ++i) r.data[i] = op(f,a.data[i]);
- r.t = a.t;
-}
-r.s = op(this.s,a.s);
-r.clamp();
+  var i, f, m = Math.min(a.t,this.t);
+  for(i = 0; i < m; ++i) r.data[i] = op(this.data[i],a.data[i]);
+  if(a.t < this.t) {
+    f = a.s&this.DM;
+    for(i = m; i < this.t; ++i) r.data[i] = op(this.data[i],f);
+    r.t = this.t;
+  }
+  else {
+    f = this.s&this.DM;
+    for(i = m; i < a.t; ++i) r.data[i] = op(f,a.data[i]);
+    r.t = a.t;
+  }
+  r.s = op(this.s,a.s);
+  r.clamp();
 }
 
-//(public) this & a
+// (public) this & a
 function op_and(x,y) { return x&y; }
 function bnAnd(a) { var r = nbi(); this.bitwiseTo(a,op_and,r); return r; }
 
-//(public) this | a
+// (public) this | a
 function op_or(x,y) { return x|y; }
 function bnOr(a) { var r = nbi(); this.bitwiseTo(a,op_or,r); return r; }
 
-//(public) this ^ a
+// (public) this ^ a
 function op_xor(x,y) { return x^y; }
 function bnXor(a) { var r = nbi(); this.bitwiseTo(a,op_xor,r); return r; }
 
-//(public) this & ~a
+// (public) this & ~a
 function op_andnot(x,y) { return x&~y; }
 function bnAndNot(a) { var r = nbi(); this.bitwiseTo(a,op_andnot,r); return r; }
 
-//(public) ~this
+// (public) ~this
 function bnNot() {
-var r = nbi();
-for(var i = 0; i < this.t; ++i) r.data[i] = this.DM&~this.data[i];
-r.t = this.t;
-r.s = ~this.s;
-return r;
+  var r = nbi();
+  for(var i = 0; i < this.t; ++i) r.data[i] = this.DM&~this.data[i];
+  r.t = this.t;
+  r.s = ~this.s;
+  return r;
 }
 
-//(public) this << n
+// (public) this << n
 function bnShiftLeft(n) {
-var r = nbi();
-if(n < 0) this.rShiftTo(-n,r); else this.lShiftTo(n,r);
-return r;
+  var r = nbi();
+  if(n < 0) this.rShiftTo(-n,r); else this.lShiftTo(n,r);
+  return r;
 }
 
-//(public) this >> n
+// (public) this >> n
 function bnShiftRight(n) {
-var r = nbi();
-if(n < 0) this.lShiftTo(-n,r); else this.rShiftTo(n,r);
-return r;
+  var r = nbi();
+  if(n < 0) this.lShiftTo(-n,r); else this.rShiftTo(n,r);
+  return r;
 }
 
-//return index of lowest 1-bit in x, x < 2^31
+// return index of lowest 1-bit in x, x < 2^31
 function lbit(x) {
-if(x == 0) return -1;
-var r = 0;
-if((x&0xffff) == 0) { x >>= 16; r += 16; }
-if((x&0xff) == 0) { x >>= 8; r += 8; }
-if((x&0xf) == 0) { x >>= 4; r += 4; }
-if((x&3) == 0) { x >>= 2; r += 2; }
-if((x&1) == 0) ++r;
-return r;
+  if(x == 0) return -1;
+  var r = 0;
+  if((x&0xffff) == 0) { x >>= 16; r += 16; }
+  if((x&0xff) == 0) { x >>= 8; r += 8; }
+  if((x&0xf) == 0) { x >>= 4; r += 4; }
+  if((x&3) == 0) { x >>= 2; r += 2; }
+  if((x&1) == 0) ++r;
+  return r;
 }
 
-//(public) returns index of lowest 1-bit (or -1 if none)
+// (public) returns index of lowest 1-bit (or -1 if none)
 function bnGetLowestSetBit() {
-for(var i = 0; i < this.t; ++i)
- if(this.data[i] != 0) return i*this.DB+lbit(this.data[i]);
-if(this.s < 0) return this.t*this.DB;
-return -1;
+  for(var i = 0; i < this.t; ++i)
+    if(this.data[i] != 0) return i*this.DB+lbit(this.data[i]);
+  if(this.s < 0) return this.t*this.DB;
+  return -1;
 }
 
-//return number of 1 bits in x
+// return number of 1 bits in x
 function cbit(x) {
-var r = 0;
-while(x != 0) { x &= x-1; ++r; }
-return r;
+  var r = 0;
+  while(x != 0) { x &= x-1; ++r; }
+  return r;
 }
 
-//(public) return number of set bits
+// (public) return number of set bits
 function bnBitCount() {
-var r = 0, x = this.s&this.DM;
-for(var i = 0; i < this.t; ++i) r += cbit(this.data[i]^x);
-return r;
+  var r = 0, x = this.s&this.DM;
+  for(var i = 0; i < this.t; ++i) r += cbit(this.data[i]^x);
+  return r;
 }
 
-//(public) true iff nth bit is set
+// (public) true iff nth bit is set
 function bnTestBit(n) {
-var j = Math.floor(n/this.DB);
-if(j >= this.t) return(this.s!=0);
-return((this.data[j]&(1<<(n%this.DB)))!=0);
+  var j = Math.floor(n/this.DB);
+  if(j >= this.t) return(this.s!=0);
+  return((this.data[j]&(1<<(n%this.DB)))!=0);
 }
 
-//(protected) this op (1<<n)
+// (protected) this op (1<<n)
 function bnpChangeBit(n,op) {
-var r = BigInteger.ONE.shiftLeft(n);
-this.bitwiseTo(r,op,r);
-return r;
+  var r = BigInteger.ONE.shiftLeft(n);
+  this.bitwiseTo(r,op,r);
+  return r;
 }
 
-//(public) this | (1<<n)
+// (public) this | (1<<n)
 function bnSetBit(n) { return this.changeBit(n,op_or); }
 
-//(public) this & ~(1<<n)
+// (public) this & ~(1<<n)
 function bnClearBit(n) { return this.changeBit(n,op_andnot); }
 
-//(public) this ^ (1<<n)
+// (public) this ^ (1<<n)
 function bnFlipBit(n) { return this.changeBit(n,op_xor); }
 
-//(protected) r = this + a
+// (protected) r = this + a
 function bnpAddTo(a,r) {
-var i = 0, c = 0, m = Math.min(a.t,this.t);
-while(i < m) {
- c += this.data[i]+a.data[i];
- r.data[i++] = c&this.DM;
- c >>= this.DB;
-}
-if(a.t < this.t) {
- c += a.s;
- while(i < this.t) {
-   c += this.data[i];
-   r.data[i++] = c&this.DM;
-   c >>= this.DB;
- }
- c += this.s;
-} else {
- c += this.s;
- while(i < a.t) {
-   c += a.data[i];
-   r.data[i++] = c&this.DM;
-   c >>= this.DB;
- }
- c += a.s;
-}
-r.s = (c<0)?-1:0;
-if(c > 0) r.data[i++] = c;
-else if(c < -1) r.data[i++] = this.DV+c;
-r.t = i;
-r.clamp();
+  var i = 0, c = 0, m = Math.min(a.t,this.t);
+  while(i < m) {
+    c += this.data[i]+a.data[i];
+    r.data[i++] = c&this.DM;
+    c >>= this.DB;
+  }
+  if(a.t < this.t) {
+    c += a.s;
+    while(i < this.t) {
+      c += this.data[i];
+      r.data[i++] = c&this.DM;
+      c >>= this.DB;
+    }
+    c += this.s;
+  }
+  else {
+    c += this.s;
+    while(i < a.t) {
+      c += a.data[i];
+      r.data[i++] = c&this.DM;
+      c >>= this.DB;
+    }
+    c += a.s;
+  }
+  r.s = (c<0)?-1:0;
+  if(c > 0) r.data[i++] = c;
+  else if(c < -1) r.data[i++] = this.DV+c;
+  r.t = i;
+  r.clamp();
 }
 
-//(public) this + a
+// (public) this + a
 function bnAdd(a) { var r = nbi(); this.addTo(a,r); return r; }
 
-//(public) this - a
+// (public) this - a
 function bnSubtract(a) { var r = nbi(); this.subTo(a,r); return r; }
 
-//(public) this * a
+// (public) this * a
 function bnMultiply(a) { var r = nbi(); this.multiplyTo(a,r); return r; }
 
-//(public) this / a
+// (public) this^2
+function bnSquare() { var r = nbi(); this.squareTo(r); return r; }
+
+// (public) this / a
 function bnDivide(a) { var r = nbi(); this.divRemTo(a,r,null); return r; }
 
-//(public) this % a
+// (public) this % a
 function bnRemainder(a) { var r = nbi(); this.divRemTo(a,null,r); return r; }
 
-//(public) [this/a,this%a]
+// (public) [this/a,this%a]
 function bnDivideAndRemainder(a) {
-var q = nbi(), r = nbi();
-this.divRemTo(a,q,r);
-return new Array(q,r);
+  var q = nbi(), r = nbi();
+  this.divRemTo(a,q,r);
+  return new Array(q,r);
 }
 
-//(protected) this *= n, this >= 0, 1 < n < DV
+// (protected) this *= n, this >= 0, 1 < n < DV
 function bnpDMultiply(n) {
-this.data[this.t] = this.am(0,n-1,this,0,0,this.t);
-++this.t;
-this.clamp();
+  this.data[this.t] = this.am(0,n-1,this,0,0,this.t);
+  ++this.t;
+  this.clamp();
 }
 
-//(protected) this += n << w words, this >= 0
+// (protected) this += n << w words, this >= 0
 function bnpDAddOffset(n,w) {
-if(n == 0) return;
-while(this.t <= w) this.data[this.t++] = 0;
-this.data[w] += n;
-while(this.data[w] >= this.DV) {
- this.data[w] -= this.DV;
- if(++w >= this.t) this.data[this.t++] = 0;
- ++this.data[w];
-}
+  if(n == 0) return;
+  while(this.t <= w) this.data[this.t++] = 0;
+  this.data[w] += n;
+  while(this.data[w] >= this.DV) {
+    this.data[w] -= this.DV;
+    if(++w >= this.t) this.data[this.t++] = 0;
+    ++this.data[w];
+  }
 }
 
-//A "null" reducer
+// A "null" reducer
 function NullExp() {}
 function nNop(x) { return x; }
 function nMulTo(x,y,r) { x.multiplyTo(y,r); }
@@ -44248,68 +44625,68 @@ NullExp.prototype.revert = nNop;
 NullExp.prototype.mulTo = nMulTo;
 NullExp.prototype.sqrTo = nSqrTo;
 
-//(public) this^e
+// (public) this^e
 function bnPow(e) { return this.exp(e,new NullExp()); }
 
-//(protected) r = lower n words of "this * a", a.t <= n
-//"this" should be the larger one if appropriate.
+// (protected) r = lower n words of "this * a", a.t <= n
+// "this" should be the larger one if appropriate.
 function bnpMultiplyLowerTo(a,n,r) {
-var i = Math.min(this.t+a.t,n);
-r.s = 0; // assumes a,this >= 0
-r.t = i;
-while(i > 0) r.data[--i] = 0;
-var j;
-for(j = r.t-this.t; i < j; ++i) r.data[i+this.t] = this.am(0,a.data[i],r,i,0,this.t);
-for(j = Math.min(a.t,n); i < j; ++i) this.am(0,a.data[i],r,i,0,n-i);
-r.clamp();
+  var i = Math.min(this.t+a.t,n);
+  r.s = 0; // assumes a,this >= 0
+  r.t = i;
+  while(i > 0) r.data[--i] = 0;
+  var j;
+  for(j = r.t-this.t; i < j; ++i) r.data[i+this.t] = this.am(0,a.data[i],r,i,0,this.t);
+  for(j = Math.min(a.t,n); i < j; ++i) this.am(0,a.data[i],r,i,0,n-i);
+  r.clamp();
 }
 
-//(protected) r = "this * a" without lower n words, n > 0
-//"this" should be the larger one if appropriate.
+// (protected) r = "this * a" without lower n words, n > 0
+// "this" should be the larger one if appropriate.
 function bnpMultiplyUpperTo(a,n,r) {
---n;
-var i = r.t = this.t+a.t-n;
-r.s = 0; // assumes a,this >= 0
-while(--i >= 0) r.data[i] = 0;
-for(i = Math.max(n-this.t,0); i < a.t; ++i)
- r.data[this.t+i-n] = this.am(n-i,a.data[i],r,0,0,this.t+i-n);
-r.clamp();
-r.drShiftTo(1,r);
+  --n;
+  var i = r.t = this.t+a.t-n;
+  r.s = 0; // assumes a,this >= 0
+  while(--i >= 0) r.data[i] = 0;
+  for(i = Math.max(n-this.t,0); i < a.t; ++i)
+    r.data[this.t+i-n] = this.am(n-i,a.data[i],r,0,0,this.t+i-n);
+  r.clamp();
+  r.drShiftTo(1,r);
 }
 
-//Barrett modular reduction
+// Barrett modular reduction
 function Barrett(m) {
-// setup Barrett
-this.r2 = nbi();
-this.q3 = nbi();
-BigInteger.ONE.dlShiftTo(2*m.t,this.r2);
-this.mu = this.r2.divide(m);
-this.m = m;
+  // setup Barrett
+  this.r2 = nbi();
+  this.q3 = nbi();
+  BigInteger.ONE.dlShiftTo(2*m.t,this.r2);
+  this.mu = this.r2.divide(m);
+  this.m = m;
 }
 
 function barrettConvert(x) {
-if(x.s < 0 || x.t > 2*this.m.t) return x.mod(this.m);
-else if(x.compareTo(this.m) < 0) return x;
-else { var r = nbi(); x.copyTo(r); this.reduce(r); return r; }
+  if(x.s < 0 || x.t > 2*this.m.t) return x.mod(this.m);
+  else if(x.compareTo(this.m) < 0) return x;
+  else { var r = nbi(); x.copyTo(r); this.reduce(r); return r; }
 }
 
 function barrettRevert(x) { return x; }
 
-//x = x mod m (HAC 14.42)
+// x = x mod m (HAC 14.42)
 function barrettReduce(x) {
-x.drShiftTo(this.m.t-1,this.r2);
-if(x.t > this.m.t+1) { x.t = this.m.t+1; x.clamp(); }
-this.mu.multiplyUpperTo(this.r2,this.m.t+1,this.q3);
-this.m.multiplyLowerTo(this.q3,this.m.t+1,this.r2);
-while(x.compareTo(this.r2) < 0) x.dAddOffset(1,this.m.t+1);
-x.subTo(this.r2,x);
-while(x.compareTo(this.m) >= 0) x.subTo(this.m,x);
+  x.drShiftTo(this.m.t-1,this.r2);
+  if(x.t > this.m.t+1) { x.t = this.m.t+1; x.clamp(); }
+  this.mu.multiplyUpperTo(this.r2,this.m.t+1,this.q3);
+  this.m.multiplyLowerTo(this.q3,this.m.t+1,this.r2);
+  while(x.compareTo(this.r2) < 0) x.dAddOffset(1,this.m.t+1);
+  x.subTo(this.r2,x);
+  while(x.compareTo(this.m) >= 0) x.subTo(this.m,x);
 }
 
-//r = x^2 mod m; x != r
+// r = x^2 mod m; x != r
 function barrettSqrTo(x,r) { x.squareTo(r); this.reduce(r); }
 
-//r = x*y mod m; x,y != r
+// r = x*y mod m; x,y != r
 function barrettMulTo(x,y,r) { x.multiplyTo(y,r); this.reduce(r); }
 
 Barrett.prototype.convert = barrettConvert;
@@ -44318,187 +44695,199 @@ Barrett.prototype.reduce = barrettReduce;
 Barrett.prototype.mulTo = barrettMulTo;
 Barrett.prototype.sqrTo = barrettSqrTo;
 
-//(public) this^e % m (HAC 14.85)
+// (public) this^e % m (HAC 14.85)
 function bnModPow(e,m) {
-var i = e.bitLength(), k, r = nbv(1), z;
-if(i <= 0) return r;
-else if(i < 18) k = 1;
-else if(i < 48) k = 3;
-else if(i < 144) k = 4;
-else if(i < 768) k = 5;
-else k = 6;
-if(i < 8)
- z = new Classic(m);
-else if(m.isEven())
- z = new Barrett(m);
-else
- z = new Montgomery(m);
+  var i = e.bitLength(), k, r = nbv(1), z;
+  if(i <= 0) return r;
+  else if(i < 18) k = 1;
+  else if(i < 48) k = 3;
+  else if(i < 144) k = 4;
+  else if(i < 768) k = 5;
+  else k = 6;
+  if(i < 8)
+    z = new Classic(m);
+  else if(m.isEven())
+    z = new Barrett(m);
+  else
+    z = new Montgomery(m);
 
-// precomputation
-var g = new Array(), n = 3, k1 = k-1, km = (1<<k)-1;
-g[1] = z.convert(this);
-if(k > 1) {
- var g2 = nbi();
- z.sqrTo(g[1],g2);
- while(n <= km) {
-   g[n] = nbi();
-   z.mulTo(g2,g[n-2],g[n]);
-   n += 2;
- }
+  // precomputation
+  var g = new Array(), n = 3, k1 = k-1, km = (1<<k)-1;
+  g[1] = z.convert(this);
+  if(k > 1) {
+    var g2 = nbi();
+    z.sqrTo(g[1],g2);
+    while(n <= km) {
+      g[n] = nbi();
+      z.mulTo(g2,g[n-2],g[n]);
+      n += 2;
+    }
+  }
+
+  var j = e.t-1, w, is1 = true, r2 = nbi(), t;
+  i = nbits(e.data[j])-1;
+  while(j >= 0) {
+    if(i >= k1) w = (e.data[j]>>(i-k1))&km;
+    else {
+      w = (e.data[j]&((1<<(i+1))-1))<<(k1-i);
+      if(j > 0) w |= e.data[j-1]>>(this.DB+i-k1);
+    }
+
+    n = k;
+    while((w&1) == 0) { w >>= 1; --n; }
+    if((i -= n) < 0) { i += this.DB; --j; }
+    if(is1) {	// ret == 1, don't bother squaring or multiplying it
+      g[w].copyTo(r);
+      is1 = false;
+    }
+    else {
+      while(n > 1) { z.sqrTo(r,r2); z.sqrTo(r2,r); n -= 2; }
+      if(n > 0) z.sqrTo(r,r2); else { t = r; r = r2; r2 = t; }
+      z.mulTo(r2,g[w],r);
+    }
+
+    while(j >= 0 && (e.data[j]&(1<<i)) == 0) {
+      z.sqrTo(r,r2); t = r; r = r2; r2 = t;
+      if(--i < 0) { i = this.DB-1; --j; }
+    }
+  }
+  return z.revert(r);
 }
 
-var j = e.t-1, w, is1 = true, r2 = nbi(), t;
-i = nbits(e.data[j])-1;
-while(j >= 0) {
- if(i >= k1) w = (e.data[j]>>(i-k1))&km;
- else {
-   w = (e.data[j]&((1<<(i+1))-1))<<(k1-i);
-   if(j > 0) w |= e.data[j-1]>>(this.DB+i-k1);
- }
-
- n = k;
- while((w&1) == 0) { w >>= 1; --n; }
- if((i -= n) < 0) { i += this.DB; --j; }
- if(is1) {  // ret == 1, don't bother squaring or multiplying it
-   g[w].copyTo(r);
-   is1 = false;
- } else {
-   while(n > 1) { z.sqrTo(r,r2); z.sqrTo(r2,r); n -= 2; }
-   if(n > 0) z.sqrTo(r,r2); else { t = r; r = r2; r2 = t; }
-   z.mulTo(r2,g[w],r);
- }
-
- while(j >= 0 && (e.data[j]&(1<<i)) == 0) {
-   z.sqrTo(r,r2); t = r; r = r2; r2 = t;
-   if(--i < 0) { i = this.DB-1; --j; }
- }
-}
-return z.revert(r);
-}
-
-//(public) gcd(this,a) (HAC 14.54)
+// (public) gcd(this,a) (HAC 14.54)
 function bnGCD(a) {
-var x = (this.s<0)?this.negate():this.clone();
-var y = (a.s<0)?a.negate():a.clone();
-if(x.compareTo(y) < 0) { var t = x; x = y; y = t; }
-var i = x.getLowestSetBit(), g = y.getLowestSetBit();
-if(g < 0) return x;
-if(i < g) g = i;
-if(g > 0) {
- x.rShiftTo(g,x);
- y.rShiftTo(g,y);
-}
-while(x.signum() > 0) {
- if((i = x.getLowestSetBit()) > 0) x.rShiftTo(i,x);
- if((i = y.getLowestSetBit()) > 0) y.rShiftTo(i,y);
- if(x.compareTo(y) >= 0) {
-   x.subTo(y,x);
-   x.rShiftTo(1,x);
- } else {
-   y.subTo(x,y);
-   y.rShiftTo(1,y);
- }
-}
-if(g > 0) y.lShiftTo(g,y);
-return y;
+  var x = (this.s<0)?this.negate():this.clone();
+  var y = (a.s<0)?a.negate():a.clone();
+  if(x.compareTo(y) < 0) { var t = x; x = y; y = t; }
+  var i = x.getLowestSetBit(), g = y.getLowestSetBit();
+  if(g < 0) return x;
+  if(i < g) g = i;
+  if(g > 0) {
+    x.rShiftTo(g,x);
+    y.rShiftTo(g,y);
+  }
+  while(x.signum() > 0) {
+    if((i = x.getLowestSetBit()) > 0) x.rShiftTo(i,x);
+    if((i = y.getLowestSetBit()) > 0) y.rShiftTo(i,y);
+    if(x.compareTo(y) >= 0) {
+      x.subTo(y,x);
+      x.rShiftTo(1,x);
+    }
+    else {
+      y.subTo(x,y);
+      y.rShiftTo(1,y);
+    }
+  }
+  if(g > 0) y.lShiftTo(g,y);
+  return y;
 }
 
-//(protected) this % n, n < 2^26
+// (protected) this % n, n < 2^26
 function bnpModInt(n) {
-if(n <= 0) return 0;
-var d = this.DV%n, r = (this.s<0)?n-1:0;
-if(this.t > 0)
- if(d == 0) r = this.data[0]%n;
- else for(var i = this.t-1; i >= 0; --i) r = (d*r+this.data[i])%n;
-return r;
+  if(n <= 0) return 0;
+  var d = this.DV%n, r = (this.s<0)?n-1:0;
+  if(this.t > 0)
+    if(d == 0) r = this.data[0]%n;
+    else for(var i = this.t-1; i >= 0; --i) r = (d*r+this.data[i])%n;
+  return r;
 }
 
-//(public) 1/this % m (HAC 14.61)
+// (public) 1/this % m (HAC 14.61)
 function bnModInverse(m) {
-var ac = m.isEven();
-if((this.isEven() && ac) || m.signum() == 0) return BigInteger.ZERO;
-var u = m.clone(), v = this.clone();
-var a = nbv(1), b = nbv(0), c = nbv(0), d = nbv(1);
-while(u.signum() != 0) {
- while(u.isEven()) {
-   u.rShiftTo(1,u);
-   if(ac) {
-     if(!a.isEven() || !b.isEven()) { a.addTo(this,a); b.subTo(m,b); }
-     a.rShiftTo(1,a);
-   } else if(!b.isEven()) b.subTo(m,b);
-   b.rShiftTo(1,b);
- }
- while(v.isEven()) {
-   v.rShiftTo(1,v);
-   if(ac) {
-     if(!c.isEven() || !d.isEven()) { c.addTo(this,c); d.subTo(m,d); }
-     c.rShiftTo(1,c);
-   } else if(!d.isEven()) d.subTo(m,d);
-   d.rShiftTo(1,d);
- }
- if(u.compareTo(v) >= 0) {
-   u.subTo(v,u);
-   if(ac) a.subTo(c,a);
-   b.subTo(d,b);
- } else {
-   v.subTo(u,v);
-   if(ac) c.subTo(a,c);
-   d.subTo(b,d);
- }
-}
-if(v.compareTo(BigInteger.ONE) != 0) return BigInteger.ZERO;
-if(d.compareTo(m) >= 0) return d.subtract(m);
-if(d.signum() < 0) d.addTo(m,d); else return d;
-if(d.signum() < 0) return d.add(m); else return d;
+  // FORGE: jsbn fix
+  // avoid infinite loop
+  if(this.signum() == 0) {
+    // returning zero to align with similar behavior when no multiplicative
+    // inverse module m is found.
+    return BigInteger.ZERO;
+  }
+  var ac = m.isEven();
+  if((this.isEven() && ac) || m.signum() == 0) return BigInteger.ZERO;
+  var u = m.clone(), v = this.clone();
+  var a = nbv(1), b = nbv(0), c = nbv(0), d = nbv(1);
+  while(u.signum() != 0) {
+    while(u.isEven()) {
+      u.rShiftTo(1,u);
+      if(ac) {
+        if(!a.isEven() || !b.isEven()) { a.addTo(this,a); b.subTo(m,b); }
+        a.rShiftTo(1,a);
+      }
+      else if(!b.isEven()) b.subTo(m,b);
+      b.rShiftTo(1,b);
+    }
+    while(v.isEven()) {
+      v.rShiftTo(1,v);
+      if(ac) {
+        if(!c.isEven() || !d.isEven()) { c.addTo(this,c); d.subTo(m,d); }
+        c.rShiftTo(1,c);
+      }
+      else if(!d.isEven()) d.subTo(m,d);
+      d.rShiftTo(1,d);
+    }
+    if(u.compareTo(v) >= 0) {
+      u.subTo(v,u);
+      if(ac) a.subTo(c,a);
+      b.subTo(d,b);
+    }
+    else {
+      v.subTo(u,v);
+      if(ac) c.subTo(a,c);
+      d.subTo(b,d);
+    }
+  }
+  if(v.compareTo(BigInteger.ONE) != 0) return BigInteger.ZERO;
+  if(d.compareTo(m) >= 0) return d.subtract(m);
+  if(d.signum() < 0) d.addTo(m,d); else return d;
+  if(d.signum() < 0) return d.add(m); else return d;
 }
 
-var lowprimes = [2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97,101,103,107,109,113,127,131,137,139,149,151,157,163,167,173,179,181,191,193,197,199,211,223,227,229,233,239,241,251,257,263,269,271,277,281,283,293,307,311,313,317,331,337,347,349,353,359,367,373,379,383,389,397,401,409,419,421,431,433,439,443,449,457,461,463,467,479,487,491,499,503,509];
+var lowprimes = [2,3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97,101,103,107,109,113,127,131,137,139,149,151,157,163,167,173,179,181,191,193,197,199,211,223,227,229,233,239,241,251,257,263,269,271,277,281,283,293,307,311,313,317,331,337,347,349,353,359,367,373,379,383,389,397,401,409,419,421,431,433,439,443,449,457,461,463,467,479,487,491,499,503,509,521,523,541,547,557,563,569,571,577,587,593,599,601,607,613,617,619,631,641,643,647,653,659,661,673,677,683,691,701,709,719,727,733,739,743,751,757,761,769,773,787,797,809,811,821,823,827,829,839,853,857,859,863,877,881,883,887,907,911,919,929,937,941,947,953,967,971,977,983,991,997];
 var lplim = (1<<26)/lowprimes[lowprimes.length-1];
 
-//(public) test primality with certainty >= 1-.5^t
+// (public) test primality with certainty >= 1-.5^t
 function bnIsProbablePrime(t) {
-var i, x = this.abs();
-if(x.t == 1 && x.data[0] <= lowprimes[lowprimes.length-1]) {
- for(i = 0; i < lowprimes.length; ++i)
-   if(x.data[0] == lowprimes[i]) return true;
- return false;
-}
-if(x.isEven()) return false;
-i = 1;
-while(i < lowprimes.length) {
- var m = lowprimes[i], j = i+1;
- while(j < lowprimes.length && m < lplim) m *= lowprimes[j++];
- m = x.modInt(m);
- while(i < j) if(m%lowprimes[i++] == 0) return false;
-}
-return x.millerRabin(t);
+  var i, x = this.abs();
+  if(x.t == 1 && x.data[0] <= lowprimes[lowprimes.length-1]) {
+    for(i = 0; i < lowprimes.length; ++i)
+      if(x.data[0] == lowprimes[i]) return true;
+    return false;
+  }
+  if(x.isEven()) return false;
+  i = 1;
+  while(i < lowprimes.length) {
+    var m = lowprimes[i], j = i+1;
+    while(j < lowprimes.length && m < lplim) m *= lowprimes[j++];
+    m = x.modInt(m);
+    while(i < j) if(m%lowprimes[i++] == 0) return false;
+  }
+  return x.millerRabin(t);
 }
 
-//(protected) true if probably prime (HAC 4.24, Miller-Rabin)
+// (protected) true if probably prime (HAC 4.24, Miller-Rabin)
 function bnpMillerRabin(t) {
-var n1 = this.subtract(BigInteger.ONE);
-var k = n1.getLowestSetBit();
-if(k <= 0) return false;
-var r = n1.shiftRight(k);
-var prng = bnGetPrng();
-var a;
-for(var i = 0; i < t; ++i) {
- // select witness 'a' at random from between 1 and n1
- do {
-   a = new BigInteger(this.bitLength(), prng);
- }
- while(a.compareTo(BigInteger.ONE) <= 0 || a.compareTo(n1) >= 0);
- var y = a.modPow(r,this);
- if(y.compareTo(BigInteger.ONE) != 0 && y.compareTo(n1) != 0) {
-   var j = 1;
-   while(j++ < k && y.compareTo(n1) != 0) {
-     y = y.modPowInt(2,this);
-     if(y.compareTo(BigInteger.ONE) == 0) return false;
-   }
-   if(y.compareTo(n1) != 0) return false;
- }
-}
-return true;
+  var n1 = this.subtract(BigInteger.ONE);
+  var k = n1.getLowestSetBit();
+  if(k <= 0) return false;
+  var r = n1.shiftRight(k);
+  var prng = bnGetPrng();
+  var a;
+  for(var i = 0; i < t; ++i) {
+    // select witness 'a' at random from between 1 and n1
+    do {
+      a = new BigInteger(this.bitLength(), prng);
+    }
+    while(a.compareTo(BigInteger.ONE) <= 0 || a.compareTo(n1) >= 0);
+    var y = a.modPow(r,this);
+    if(y.compareTo(BigInteger.ONE) != 0 && y.compareTo(n1) != 0) {
+      var j = 1;
+      while(j++ < k && y.compareTo(n1) != 0) {
+        y = y.modPowInt(2,this);
+        if(y.compareTo(BigInteger.ONE) == 0) return false;
+      }
+      if(y.compareTo(n1) != 0) return false;
+    }
+  }
+  return true;
 }
 
 // get pseudo random number generator
@@ -44514,7 +44903,7 @@ function bnGetPrng() {
   };
 }
 
-//protected
+// protected
 BigInteger.prototype.chunkSize = bnpChunkSize;
 BigInteger.prototype.toRadix = bnpToRadix;
 BigInteger.prototype.fromRadix = bnpFromRadix;
@@ -44529,7 +44918,7 @@ BigInteger.prototype.multiplyUpperTo = bnpMultiplyUpperTo;
 BigInteger.prototype.modInt = bnpModInt;
 BigInteger.prototype.millerRabin = bnpMillerRabin;
 
-//public
+// public
 BigInteger.prototype.clone = bnClone;
 BigInteger.prototype.intValue = bnIntValue;
 BigInteger.prototype.byteValue = bnByteValue;
@@ -44564,14 +44953,17 @@ BigInteger.prototype.pow = bnPow;
 BigInteger.prototype.gcd = bnGCD;
 BigInteger.prototype.isProbablePrime = bnIsProbablePrime;
 
-//BigInteger interfaces not implemented in jsbn:
+// JSBN-specific extension
+BigInteger.prototype.square = bnSquare;
 
-//BigInteger(int signum, byte[] magnitude)
-//double doubleValue()
-//float floatValue()
-//int hashCode()
-//long longValue()
-//static BigInteger valueOf(long val)
+// BigInteger interfaces not implemented in jsbn:
+
+// BigInteger(int signum, byte[] magnitude)
+// double doubleValue()
+// float floatValue()
+// int hashCode()
+// long longValue()
+// static BigInteger valueOf(long val)
 
 
 /***/ }),
@@ -45622,6 +46014,7 @@ _IN('2.5.4.13', 'description');
 _IN('2.5.4.15', 'businessCategory');
 _IN('2.5.4.17', 'postalCode');
 _IN('2.5.4.42', 'givenName');
+_IN('2.5.4.65', 'pseudonym');
 _IN('1.3.6.1.4.1.311.60.2.1.2', 'jurisdictionOfIncorporationStateOrProvinceName');
 _IN('1.3.6.1.4.1.311.60.2.1.3', 'jurisdictionOfIncorporationCountryName');
 
@@ -53064,6 +53457,9 @@ pki.setRsaPublicKey = pki.rsa.setPublicKey = function(n, e) {
    *          _parseAllDigestBytes testing flag to control parsing of all
    *            digest bytes. Unsupported and not for general usage.
    *            (default: true)
+   *          _skipPaddingChecks testing flag to skip some padding checks to
+   *            test other checks. Unsupported and not for general usage.
+   *            (default: false)
    *
    * @return true if the signature was verified, false if not.
    */
@@ -53075,27 +53471,32 @@ pki.setRsaPublicKey = pki.rsa.setPublicKey = function(n, e) {
     }
     if(options === undefined) {
       options = {
-        _parseAllDigestBytes: true
+        _parseAllDigestBytes: true,
+        _skipPaddingChecks: false
       };
     }
     if(!('_parseAllDigestBytes' in options)) {
       options._parseAllDigestBytes = true;
+    }
+    if(!('_skipPaddingChecks' in options)) {
+      options._skipPaddingChecks = false;
     }
 
     if(scheme === 'RSASSA-PKCS1-V1_5') {
       scheme = {
         verify: function(digest, d) {
           // remove padding
-          d = _decodePkcs1_v1_5(d, key, true);
+          d = _decodePkcs1_v1_5(d, key, true, undefined, options);
           // d is ASN.1 BER-encoded DigestInfo
           var obj = asn1.fromDer(d, {
             parseAllBytes: options._parseAllDigestBytes
           });
 
-          // validate DigestInfo
+          // validate DigestInfo structure and element count
           var capture = {};
           var errors = [];
-          if(!asn1.validate(obj, digestInfoValidator, capture, errors)) {
+          if(!asn1.validate(obj, digestInfoValidator, capture, errors) ||
+            obj.value.length !== 2) {
             var error = new Error(
               'ASN.1 object does not contain a valid RSASSA-PKCS1-v1_5 ' +
               'DigestInfo value.');
@@ -53139,7 +53540,7 @@ pki.setRsaPublicKey = pki.rsa.setPublicKey = function(n, e) {
       scheme = {
         verify: function(digest, d) {
           // remove padding
-          d = _decodePkcs1_v1_5(d, key, true);
+          d = _decodePkcs1_v1_5(d, key, true, undefined, options);
           return digest === d;
         }
       };
@@ -53557,10 +53958,11 @@ function _encodePkcs1_v1_5(m, key, bt) {
  * @param key the RSA key to use.
  * @param pub true if the key is a public key, false if it is private.
  * @param ml the message length, if specified.
+ * @param options testing options.
  *
  * @return the decoded bytes.
  */
-function _decodePkcs1_v1_5(em, key, pub, ml) {
+function _decodePkcs1_v1_5(em, key, pub, ml, options) {
   // get the length of the modulus in bytes
   var k = Math.ceil(key.n.bitLength() / 8);
 
@@ -53580,7 +53982,7 @@ function _decodePkcs1_v1_5(em, key, pub, ml) {
   var bt = eb.getByte();
   if(first !== 0x00 ||
     (pub && bt !== 0x00 && bt !== 0x01) ||
-    (!pub && bt != 0x02) ||
+    (!pub && bt !== 0x02) ||
     (pub && bt === 0x00 && typeof(ml) === 'undefined')) {
     throw new Error('Encryption block is invalid.');
   }
@@ -53604,6 +54006,11 @@ function _decodePkcs1_v1_5(em, key, pub, ml) {
       }
       ++padNum;
     }
+
+    // RFC 2313 8.1 note 6
+    if(padNum < 8 && !(options ? options._skipPaddingChecks : false)) {
+      throw new Error('Encryption block is invalid.');
+    }
   } else if(bt === 0x02) {
     // look for 0x00 byte
     padNum = 0;
@@ -53613,6 +54020,11 @@ function _decodePkcs1_v1_5(em, key, pub, ml) {
         break;
       }
       ++padNum;
+    }
+
+    // RFC 2313 8.1 note 6
+    if(padNum < 8 && !(options ? options._skipPaddingChecks : false)) {
+      throw new Error('Encryption block is invalid.');
     }
   }
 
@@ -65473,6 +65885,15 @@ pki.verifyCertificateChain = function(caStore, chain, options) {
           };
         }
       }
+      // check for absent basicConstraints on non-leaf certificates
+      if(error === null && bcExt === null) {
+        error = {
+          message:
+            'Certificate is missing basicConstraints extension and cannot ' +
+            'be used as a CA.',
+          error: pki.certificateError.bad_certificate
+        };
+      }
       // basic constraints cA flag must be set
       if(error === null && bcExt !== null && !bcExt.cA) {
         // bad certificate
@@ -65615,7 +66036,11 @@ var Namespace = $protobuf.Namespace,
     MapField  = $protobuf.MapField,
     OneOf     = $protobuf.OneOf,
     Service   = $protobuf.Service,
-    Method    = $protobuf.Method;
+    Method    = $protobuf.Method,
+    patterns  = $protobuf.util.patterns;
+
+var numberRe  = patterns.numberRe,
+    typeRefRe = patterns.typeRefRe;
 
 // --- Root ---
 
@@ -65640,6 +66065,25 @@ var Namespace = $protobuf.Namespace,
  * @property {IFileOptions} [options] Options
  * @property {*} [sourceCodeInfo] Not supported
  * @property {string} [syntax="proto2"] Syntax
+ * @property {IEdition} [edition] Edition
+ */
+
+/**
+ * Values of the Edition enum.
+ * @typedef IEdition
+ * @type {number}
+ * @property {number} EDITION_UNKNOWN=0
+ * @property {number} EDITION_LEGACY=900
+ * @property {number} EDITION_PROTO2=998
+ * @property {number} EDITION_PROTO3=999
+ * @property {number} EDITION_2023=1000
+ * @property {number} EDITION_2024=1001
+ * @property {number} EDITION_1_TEST_ONLY=1
+ * @property {number} EDITION_2_TEST_ONLY=2
+ * @property {number} EDITION_99997_TEST_ONLY=99997
+ * @property {number} EDITION_99998_TEST_ONLY=99998
+ * @property {number} EDITION_99998_TEST_ONLY=99999
+ * @property {number} EDITION_MAX=2147483647
  */
 
 /**
@@ -65690,20 +66134,21 @@ Root.fromDescriptor = function fromDescriptor(descriptor) {
             filePackage = root;
             if ((fileDescriptor = descriptor.file[j])["package"] && fileDescriptor["package"].length)
                 filePackage = root.define(fileDescriptor["package"]);
+            var edition = editionFromDescriptor(fileDescriptor);
             if (fileDescriptor.name && fileDescriptor.name.length)
                 root.files.push(filePackage.filename = fileDescriptor.name);
             if (fileDescriptor.messageType)
                 for (i = 0; i < fileDescriptor.messageType.length; ++i)
-                    filePackage.add(Type.fromDescriptor(fileDescriptor.messageType[i], fileDescriptor.syntax));
+                    filePackage.add(Type.fromDescriptor(fileDescriptor.messageType[i], edition));
             if (fileDescriptor.enumType)
                 for (i = 0; i < fileDescriptor.enumType.length; ++i)
-                    filePackage.add(Enum.fromDescriptor(fileDescriptor.enumType[i]));
+                    filePackage.add(Enum.fromDescriptor(fileDescriptor.enumType[i], edition));
             if (fileDescriptor.extension)
                 for (i = 0; i < fileDescriptor.extension.length; ++i)
-                    filePackage.add(Field.fromDescriptor(fileDescriptor.extension[i]));
+                    filePackage.add(Field.fromDescriptor(fileDescriptor.extension[i], edition));
             if (fileDescriptor.service)
                 for (i = 0; i < fileDescriptor.service.length; ++i)
-                    filePackage.add(Service.fromDescriptor(fileDescriptor.service[i]));
+                    filePackage.add(Service.fromDescriptor(fileDescriptor.service[i], edition));
             var opts = fromDescriptorOptions(fileDescriptor.options, exports.FileOptions);
             if (opts) {
                 var ks = Object.keys(opts);
@@ -65713,42 +66158,41 @@ Root.fromDescriptor = function fromDescriptor(descriptor) {
         }
     }
 
-    return root;
+    return root.resolveAll();
 };
 
 /**
  * Converts a root to a descriptor set.
  * @returns {Message<IFileDescriptorSet>} Descriptor
- * @param {string} [syntax="proto2"] Syntax
+ * @param {string} [edition="proto2"] The syntax or edition to use
  */
-Root.prototype.toDescriptor = function toDescriptor(syntax) {
+Root.prototype.toDescriptor = function toDescriptor(edition) {
     var set = exports.FileDescriptorSet.create();
-    Root_toDescriptorRecursive(this, set.file, syntax);
+    Root_toDescriptorRecursive(this, set.file, edition);
     return set;
 };
 
 // Traverses a namespace and assembles the descriptor set
-function Root_toDescriptorRecursive(ns, files, syntax) {
+function Root_toDescriptorRecursive(ns, files, edition) {
 
     // Create a new file
     var file = exports.FileDescriptorProto.create({ name: ns.filename || (ns.fullName.substring(1).replace(/\./g, "_") || "root") + ".proto" });
-    if (syntax)
-        file.syntax = syntax;
+    editionToDescriptor(edition, file);
     if (!(ns instanceof Root))
         file["package"] = ns.fullName.substring(1);
 
     // Add nested types
     for (var i = 0, nested; i < ns.nestedArray.length; ++i)
         if ((nested = ns._nestedArray[i]) instanceof Type)
-            file.messageType.push(nested.toDescriptor(syntax));
+            file.messageType.push(nested.toDescriptor(edition));
         else if (nested instanceof Enum)
             file.enumType.push(nested.toDescriptor());
         else if (nested instanceof Field)
-            file.extension.push(nested.toDescriptor(syntax));
+            file.extension.push(nested.toDescriptor(edition));
         else if (nested instanceof Service)
             file.service.push(nested.toDescriptor());
         else if (nested instanceof /* plain */ Namespace)
-            Root_toDescriptorRecursive(nested, files, syntax); // requires new file
+            Root_toDescriptorRecursive(nested, files, edition); // requires new file
 
     // Keep package-level options
     file.options = toDescriptorOptions(ns.options, exports.FileOptions);
@@ -65799,12 +66243,15 @@ var unnamedMessageIndex = 0;
 
 /**
  * Creates a type from a descriptor.
+ *
+ * Warning: this is not safe to use with editions protos, since it discards relevant file context.
+ *
  * @param {IDescriptorProto|Reader|Uint8Array} descriptor Descriptor
- * @param {string} [syntax="proto2"] Syntax
+ * @param {string} [edition="proto2"] The syntax or edition to use
+ * @param {boolean} [nested=false] Whether or not this is a nested object
  * @returns {Type} Type instance
  */
-Type.fromDescriptor = function fromDescriptor(descriptor, syntax) {
-
+Type.fromDescriptor = function fromDescriptor(descriptor, edition, nested) {
     // Decode the descriptor message if specified as a buffer:
     if (typeof descriptor.length === "number")
         descriptor = exports.DescriptorProto.decode(descriptor);
@@ -65813,28 +66260,31 @@ Type.fromDescriptor = function fromDescriptor(descriptor, syntax) {
     var type = new Type(descriptor.name.length ? descriptor.name : "Type" + unnamedMessageIndex++, fromDescriptorOptions(descriptor.options, exports.MessageOptions)),
         i;
 
+    if (!nested)
+        type._edition = edition;
+
     /* Oneofs */ if (descriptor.oneofDecl)
         for (i = 0; i < descriptor.oneofDecl.length; ++i)
             type.add(OneOf.fromDescriptor(descriptor.oneofDecl[i]));
     /* Fields */ if (descriptor.field)
         for (i = 0; i < descriptor.field.length; ++i) {
-            var field = Field.fromDescriptor(descriptor.field[i], syntax);
+            var field = Field.fromDescriptor(descriptor.field[i], edition, true);
             type.add(field);
             if (descriptor.field[i].hasOwnProperty("oneofIndex")) // eslint-disable-line no-prototype-builtins
                 type.oneofsArray[descriptor.field[i].oneofIndex].add(field);
         }
     /* Extension fields */ if (descriptor.extension)
         for (i = 0; i < descriptor.extension.length; ++i)
-            type.add(Field.fromDescriptor(descriptor.extension[i], syntax));
+            type.add(Field.fromDescriptor(descriptor.extension[i], edition, true));
     /* Nested types */ if (descriptor.nestedType)
         for (i = 0; i < descriptor.nestedType.length; ++i) {
-            type.add(Type.fromDescriptor(descriptor.nestedType[i], syntax));
+            type.add(Type.fromDescriptor(descriptor.nestedType[i], edition, true));
             if (descriptor.nestedType[i].options && descriptor.nestedType[i].options.mapEntry)
                 type.setOption("map_entry", true);
         }
     /* Nested enums */ if (descriptor.enumType)
         for (i = 0; i < descriptor.enumType.length; ++i)
-            type.add(Enum.fromDescriptor(descriptor.enumType[i]));
+            type.add(Enum.fromDescriptor(descriptor.enumType[i], edition, true));
     /* Extension ranges */ if (descriptor.extensionRange && descriptor.extensionRange.length) {
         type.extensions = [];
         for (i = 0; i < descriptor.extensionRange.length; ++i)
@@ -65856,18 +66306,18 @@ Type.fromDescriptor = function fromDescriptor(descriptor, syntax) {
 /**
  * Converts a type to a descriptor.
  * @returns {Message<IDescriptorProto>} Descriptor
- * @param {string} [syntax="proto2"] Syntax
+ * @param {string} [edition="proto2"] The syntax or edition to use
  */
-Type.prototype.toDescriptor = function toDescriptor(syntax) {
+Type.prototype.toDescriptor = function toDescriptor(edition) {
     var descriptor = exports.DescriptorProto.create({ name: this.name }),
         i;
 
     /* Fields */ for (i = 0; i < this.fieldsArray.length; ++i) {
         var fieldDescriptor;
-        descriptor.field.push(fieldDescriptor = this._fieldsArray[i].toDescriptor(syntax));
+        descriptor.field.push(fieldDescriptor = this._fieldsArray[i].toDescriptor(edition));
         if (this._fieldsArray[i] instanceof MapField) { // map fields are repeated FieldNameEntry
-            var keyType = toDescriptorType(this._fieldsArray[i].keyType, this._fieldsArray[i].resolvedKeyType),
-                valueType = toDescriptorType(this._fieldsArray[i].type, this._fieldsArray[i].resolvedType),
+            var keyType = toDescriptorType(this._fieldsArray[i].keyType, this._fieldsArray[i].resolvedKeyType, false),
+                valueType = toDescriptorType(this._fieldsArray[i].type, this._fieldsArray[i].resolvedType, false),
                 valueTypeName = valueType === /* type */ 11 || valueType === /* enum */ 14
                     ? this._fieldsArray[i].resolvedType && shortname(this.parent, this._fieldsArray[i].resolvedType) || this._fieldsArray[i].type
                     : undefined;
@@ -65885,9 +66335,9 @@ Type.prototype.toDescriptor = function toDescriptor(syntax) {
         descriptor.oneofDecl.push(this._oneofsArray[i].toDescriptor());
     /* Nested... */ for (i = 0; i < this.nestedArray.length; ++i) {
         /* Extension fields */ if (this._nestedArray[i] instanceof Field)
-            descriptor.field.push(this._nestedArray[i].toDescriptor(syntax));
+            descriptor.field.push(this._nestedArray[i].toDescriptor(edition));
         /* Types */ else if (this._nestedArray[i] instanceof Type)
-            descriptor.nestedType.push(this._nestedArray[i].toDescriptor(syntax));
+            descriptor.nestedType.push(this._nestedArray[i].toDescriptor(edition));
         /* Enums */ else if (this._nestedArray[i] instanceof Enum)
             descriptor.enumType.push(this._nestedArray[i].toDescriptor());
         // plain nested namespaces become packages instead in Root#toDescriptor
@@ -65973,16 +66423,17 @@ Type.prototype.toDescriptor = function toDescriptor(syntax) {
  * @property {number} JS_NUMBER=2
  */
 
-// copied here from parse.js
-var numberRe = /^(?![eE])[0-9]*(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?$/;
-
 /**
  * Creates a field from a descriptor.
+ *
+ * Warning: this is not safe to use with editions protos, since it discards relevant file context.
+ *
  * @param {IFieldDescriptorProto|Reader|Uint8Array} descriptor Descriptor
- * @param {string} [syntax="proto2"] Syntax
+ * @param {string} [edition="proto2"] The syntax or edition to use
+ * @param {boolean} [nested=false] Whether or not this is a top-level object
  * @returns {Field} Field instance
  */
-Field.fromDescriptor = function fromDescriptor(descriptor, syntax) {
+Field.fromDescriptor = function fromDescriptor(descriptor, edition, nested) {
 
     // Decode the descriptor message if specified as a buffer:
     if (typeof descriptor.length === "number")
@@ -65992,10 +66443,13 @@ Field.fromDescriptor = function fromDescriptor(descriptor, syntax) {
         throw Error("missing field id");
 
     // Rewire field type
-    var fieldType;
-    if (descriptor.typeName && descriptor.typeName.length)
-        fieldType = descriptor.typeName;
-    else
+    var typeName = descriptor.typeName,
+        fieldType;
+    if (typeName != null && typeName !== "") {
+        if (typeof typeName !== "string" || !typeRefRe.test(typeName))
+            throw Error("illegal type name: " + typeName);
+        fieldType = typeName;
+    } else
         fieldType = fromDescriptorType(descriptor.type);
 
     // Rewire field rule
@@ -66008,10 +66462,12 @@ Field.fromDescriptor = function fromDescriptor(descriptor, syntax) {
         default: throw Error("illegal label: " + descriptor.label);
     }
 
-	var extendee = descriptor.extendee;
-	if (descriptor.extendee !== undefined) {
-		extendee = extendee.length ? extendee : undefined;
-	}
+    var extendee = descriptor.extendee;
+    if (extendee != null && extendee !== "") {
+        if (typeof extendee !== "string" || !typeRefRe.test(extendee))
+            throw Error("illegal type name: " + extendee);
+    } else
+        extendee = undefined;
     var field = new Field(
         descriptor.name.length ? descriptor.name : "field" + descriptor.number,
         descriptor.number,
@@ -66020,7 +66476,12 @@ Field.fromDescriptor = function fromDescriptor(descriptor, syntax) {
         extendee
     );
 
+    if (!nested)
+        field._edition = edition;
+
     field.options = fromDescriptorOptions(descriptor.options, exports.FieldOptions);
+    if (descriptor.proto3_optional)
+        field.options.proto3_optional = true;
 
     if (descriptor.defaultValue && descriptor.defaultValue.length) {
         var defaultValue = descriptor.defaultValue;
@@ -66041,11 +66502,11 @@ Field.fromDescriptor = function fromDescriptor(descriptor, syntax) {
     }
 
     if (packableDescriptorType(descriptor.type)) {
-        if (syntax === "proto3") { // defaults to packed=true (internal preset is packed=true)
+        if (edition === "proto3") { // defaults to packed=true (internal preset is packed=true)
             if (descriptor.options && !descriptor.options.packed)
                 field.setOption("packed", false);
-        } else if (!(descriptor.options && descriptor.options.packed)) // defaults to packed=false
-            field.setOption("packed", false);
+        } else if ((!edition || edition === "proto2") && descriptor.options && descriptor.options.packed) // defaults to packed=false
+            field.setOption("packed", true);
     }
 
     return field;
@@ -66054,9 +66515,9 @@ Field.fromDescriptor = function fromDescriptor(descriptor, syntax) {
 /**
  * Converts a field to a descriptor.
  * @returns {Message<IFieldDescriptorProto>} Descriptor
- * @param {string} [syntax="proto2"] Syntax
+ * @param {string} [edition="proto2"] The syntax or edition to use
  */
-Field.prototype.toDescriptor = function toDescriptor(syntax) {
+Field.prototype.toDescriptor = function toDescriptor(edition) {
     var descriptor = exports.FieldDescriptorProto.create({ name: this.name, number: this.id });
 
     if (this.map) {
@@ -66068,7 +66529,7 @@ Field.prototype.toDescriptor = function toDescriptor(syntax) {
     } else {
 
         // Rewire field type
-        switch (descriptor.type = toDescriptorType(this.type, this.resolve().resolvedType)) {
+        switch (descriptor.type = toDescriptorType(this.type, this.resolve().resolvedType, this.delimited)) {
             case 10: // group
             case 11: // type
             case 14: // enum
@@ -66077,32 +66538,36 @@ Field.prototype.toDescriptor = function toDescriptor(syntax) {
         }
 
         // Rewire field rule
-        switch (this.rule) {
-            case "repeated": descriptor.label = 3; break;
-            case "required": descriptor.label = 2; break;
-            default: descriptor.label = 1; break;
+        if (this.rule === "repeated") {
+            descriptor.label = 3;
+        } else if (this.required && edition === "proto2") {
+            descriptor.label = 2;
+        } else {
+            descriptor.label = 1;
         }
-
     }
 
     // Handle extension field
     descriptor.extendee = this.extensionField ? this.extensionField.parent.fullName : this.extend;
 
-    // Handle part of oneof
-    if (this.partOf)
+    // Handle part of oneof (only meaningful for message types)
+    if (this.partOf && this.parent instanceof Type) {
         if ((descriptor.oneofIndex = this.parent.oneofsArray.indexOf(this.partOf)) < 0)
             throw Error("missing oneof");
+    }
 
     if (this.options) {
         descriptor.options = toDescriptorOptions(this.options, exports.FieldOptions);
         if (this.options["default"] != null)
             descriptor.defaultValue = String(this.options["default"]);
+        if (this.options.proto3_optional)
+            descriptor.proto3_optional = true;
     }
 
-    if (syntax === "proto3") { // defaults to packed=true
+    if (edition === "proto3") { // defaults to packed=true
         if (!this.packed)
             (descriptor.options || (descriptor.options = exports.FieldOptions.create())).packed = false;
-    } else if (this.packed) // defaults to packed=false
+    } else if ((!edition || edition === "proto2") && this.packed) // defaults to packed=false
         (descriptor.options || (descriptor.options = exports.FieldOptions.create())).packed = true;
 
     return descriptor;
@@ -66137,10 +66602,15 @@ var unnamedEnumIndex = 0;
 
 /**
  * Creates an enum from a descriptor.
+ *
+ * Warning: this is not safe to use with editions protos, since it discards relevant file context.
+ *
  * @param {IEnumDescriptorProto|Reader|Uint8Array} descriptor Descriptor
+ * @param {string} [edition="proto2"] The syntax or edition to use
+ * @param {boolean} [nested=false] Whether or not this is a top-level object
  * @returns {Enum} Enum instance
  */
-Enum.fromDescriptor = function fromDescriptor(descriptor) {
+Enum.fromDescriptor = function fromDescriptor(descriptor, edition, nested) {
 
     // Decode the descriptor message if specified as a buffer:
     if (typeof descriptor.length === "number")
@@ -66155,11 +66625,16 @@ Enum.fromDescriptor = function fromDescriptor(descriptor) {
             values[name && name.length ? name : "NAME" + value] = value;
         }
 
-    return new Enum(
+    var enm = new Enum(
         descriptor.name && descriptor.name.length ? descriptor.name : "Enum" + unnamedEnumIndex++,
         values,
         fromDescriptorOptions(descriptor.options, exports.EnumOptions)
     );
+
+    if (!nested)
+        enm._edition = edition;
+
+    return enm;
 };
 
 /**
@@ -66193,6 +66668,9 @@ var unnamedOneofIndex = 0;
 
 /**
  * Creates a oneof from a descriptor.
+ *
+ * Warning: this is not safe to use with editions protos, since it discards relevant file context.
+ *
  * @param {IOneofDescriptorProto|Reader|Uint8Array} descriptor Descriptor
  * @returns {OneOf} OneOf instance
  */
@@ -66240,16 +66718,23 @@ var unnamedServiceIndex = 0;
 
 /**
  * Creates a service from a descriptor.
+ *
+ * Warning: this is not safe to use with editions protos, since it discards relevant file context.
+ *
  * @param {IServiceDescriptorProto|Reader|Uint8Array} descriptor Descriptor
+ * @param {string} [edition="proto2"] The syntax or edition to use
+ * @param {boolean} [nested=false] Whether or not this is a top-level object
  * @returns {Service} Service instance
  */
-Service.fromDescriptor = function fromDescriptor(descriptor) {
+Service.fromDescriptor = function fromDescriptor(descriptor, edition, nested) {
 
     // Decode the descriptor message if specified as a buffer:
     if (typeof descriptor.length === "number")
         descriptor = exports.ServiceDescriptorProto.decode(descriptor);
 
     var service = new Service(descriptor.name && descriptor.name.length ? descriptor.name : "Service" + unnamedServiceIndex++, fromDescriptorOptions(descriptor.options, exports.ServiceOptions));
+    if (!nested)
+        service._edition = edition;
     if (descriptor.method)
         for (var i = 0; i < descriptor.method.length; ++i)
             service.add(Method.fromDescriptor(descriptor.method[i]));
@@ -66290,6 +66775,9 @@ Service.prototype.toDescriptor = function toDescriptor() {
 
 /**
  * Properties of a MethodOptions message.
+ *
+ * Warning: this is not safe to use with editions protos, since it discards relevant file context.
+ *
  * @interface IMethodOptions
  * @property {boolean} [deprecated]
  */
@@ -66307,12 +66795,24 @@ Method.fromDescriptor = function fromDescriptor(descriptor) {
     if (typeof descriptor.length === "number")
         descriptor = exports.MethodDescriptorProto.decode(descriptor);
 
+    var inputType = descriptor.inputType,
+        outputType = descriptor.outputType;
+
+    if (inputType != null && inputType !== "") {
+        if (typeof inputType !== "string" || !typeRefRe.test(inputType))
+            throw Error("illegal type name: " + inputType);
+    }
+    if (outputType != null && outputType !== "") {
+        if (typeof outputType !== "string" || !typeRefRe.test(outputType))
+            throw Error("illegal type name: " + outputType);
+    }
+
     return new Method(
         // unnamedMethodIndex is global, not per service, because we have no ref to a service here
         descriptor.name && descriptor.name.length ? descriptor.name : "Method" + unnamedMethodIndex++,
         "rpc",
-        descriptor.inputType,
-        descriptor.outputType,
+        inputType,
+        outputType,
         Boolean(descriptor.clientStreaming),
         Boolean(descriptor.serverStreaming),
         fromDescriptorOptions(descriptor.options, exports.MethodOptions)
@@ -66382,7 +66882,7 @@ function packableDescriptorType(type) {
 }
 
 // Converts a protobuf.js basic type to a descriptor type
-function toDescriptorType(type, resolvedType) {
+function toDescriptorType(type, resolvedType, delimited) {
     switch (type) {
         // 0 is reserved for errors
         case "double": return 1;
@@ -66404,41 +66904,60 @@ function toDescriptorType(type, resolvedType) {
     if (resolvedType instanceof Enum)
         return 14;
     if (resolvedType instanceof Type)
-        return resolvedType.group ? 10 : 11;
+        return delimited ? 10 : 11;
     throw Error("illegal type: " + type);
+}
+
+function fromDescriptorOptionsRecursive(obj, type) {
+    var val = {};
+    for (var i = 0, field, key; i < type.fieldsArray.length; ++i) {
+        if ((key = (field = type._fieldsArray[i]).name) === "uninterpretedOption") continue;
+        if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
+
+        var newKey = underScore(key);
+        if (field.resolvedType instanceof Type) {
+            val[newKey] = fromDescriptorOptionsRecursive(obj[key], field.resolvedType);
+        } else if(field.resolvedType instanceof Enum) {
+            val[newKey] = field.resolvedType.valuesById[obj[key]];
+        } else {
+            val[newKey] = obj[key];
+        }
+    }
+    return val;
 }
 
 // Converts descriptor options to an options object
 function fromDescriptorOptions(options, type) {
     if (!options)
         return undefined;
-    var out = [];
-    for (var i = 0, field, key, val; i < type.fieldsArray.length; ++i)
-        if ((key = (field = type._fieldsArray[i]).name) !== "uninterpretedOption")
-            if (options.hasOwnProperty(key)) { // eslint-disable-line no-prototype-builtins
-                val = options[key];
-                if (field.resolvedType instanceof Enum && typeof val === "number" && field.resolvedType.valuesById[val] !== undefined)
-                    val = field.resolvedType.valuesById[val];
-                out.push(underScore(key), val);
-            }
-    return out.length ? $protobuf.util.toObject(out) : undefined;
+    return fromDescriptorOptionsRecursive(type.toObject(options), type);
+}
+
+function toDescriptorOptionsRecursive(obj, type) {
+    var val = {};
+    var keys = Object.keys(obj);
+    for (var i = 0; i < keys.length; ++i) {
+        var key = keys[i];
+        var newKey = $protobuf.util.camelCase(key);
+        if (!Object.prototype.hasOwnProperty.call(type.fields, newKey)) continue;
+        var field = type.fields[newKey];
+        if (field.resolvedType instanceof Type) {
+            val[newKey] = toDescriptorOptionsRecursive(obj[key], field.resolvedType);
+        } else {
+            val[newKey] = obj[key];
+        }
+        if (field.repeated && !Array.isArray(val[newKey])) {
+            val[newKey] = [val[newKey]];
+        }
+    }
+    return val;
 }
 
 // Converts an options object to descriptor options
 function toDescriptorOptions(options, type) {
     if (!options)
         return undefined;
-    var out = [];
-    for (var i = 0, ks = Object.keys(options), key, val; i < ks.length; ++i) {
-        val = options[key = ks[i]];
-        if (key === "default")
-            continue;
-        var field = type.fields[key];
-        if (!field && !(field = type.fields[key = $protobuf.util.camelCase(key)]))
-            continue;
-        out.push(key, val);
-    }
-    return out.length ? type.fromObject($protobuf.util.toObject(out)) : undefined;
+    return type.fromObject(toDescriptorOptionsRecursive(options, type));
 }
 
 // Calculates the shortest relative path from `from` to `to`.
@@ -66465,6 +66984,37 @@ function underScore(str) {
     return str.substring(0,1)
          + str.substring(1)
                .replace(/([A-Z])(?=[a-z]|$)/g, function($0, $1) { return "_" + $1.toLowerCase(); });
+}
+
+function editionFromDescriptor(fileDescriptor) {
+    if (fileDescriptor.syntax === "editions") {
+        switch(fileDescriptor.edition) {
+            case exports.Edition.EDITION_2023:
+                return "2023";
+            default:
+                throw new Error("Unsupported edition " + fileDescriptor.edition);
+        }
+    }
+    if (fileDescriptor.syntax === "proto3") {
+        return "proto3";
+    }
+    return "proto2";
+}
+
+function editionToDescriptor(edition, fileDescriptor) {
+    if (!edition) return;
+    if (edition === "proto2" || edition === "proto3") {
+        fileDescriptor.syntax = edition;
+    } else {
+        fileDescriptor.syntax = "editions";
+        switch(edition) {
+            case "2023":
+                fileDescriptor.edition = exports.Edition.EDITION_2023;
+                break;
+            default:
+                throw new Error("Unsupported edition " + edition);
+        }
+    }
 }
 
 // --- exports ---
@@ -67127,7 +67677,7 @@ function genValuePartial_fromObject(gen, field, fieldIndex, prop) {
         } else gen
             ("if(typeof d%s!==\"object\")", prop)
                 ("throw TypeError(%j)", field.fullName + ": object expected")
-            ("m%s=types[%i].fromObject(d%s)", prop, fieldIndex, prop);
+            ("m%s=types[%i].fromObject(d%s,n+1)", prop, fieldIndex, prop);
     } else {
         var isUnsigned = false;
         switch (field.type) {
@@ -67189,9 +67739,12 @@ function genValuePartial_fromObject(gen, field, fieldIndex, prop) {
 converter.fromObject = function fromObject(mtype) {
     /* eslint-disable no-unexpected-multiline, block-scoped-var, no-redeclare */
     var fields = mtype.fieldsArray;
-    var gen = util.codegen(["d"], mtype.name + "$fromObject")
+    var gen = util.codegen(["d", "n"], mtype.name + "$fromObject")
     ("if(d instanceof this.ctor)")
-        ("return d");
+        ("return d")
+    ("if(n===undefined)n=0")
+    ("if(n>util.recursionLimit)")
+        ("throw Error(\"maximum nesting depth exceeded\")");
     if (!fields.length) return gen
     ("return new this.ctor");
     gen
@@ -67207,6 +67760,9 @@ converter.fromObject = function fromObject(mtype) {
             ("throw TypeError(%j)", field.fullName + ": object expected")
         ("m%s={}", prop)
         ("for(var ks=Object.keys(d%s),i=0;i<ks.length;++i){", prop);
+            gen
+        ("if(ks[i]===\"__proto__\")")
+            ("util.makeProp(m%s,ks[i])", prop);
             genValuePartial_fromObject(gen, field, /* not sorted */ i, prop + "[ks[i]]")
         ("}")
     ("}");
@@ -67337,11 +67893,11 @@ converter.toObject = function toObject(mtype) {
         ("}else")
             ("d%s=o.longs===String?%j:%i", prop, field.typeDefault.toString(), field.typeDefault.toNumber());
             else if (field.bytes) {
-                var arrayDefault = "[" + Array.prototype.slice.call(field.typeDefault).join(",") + "]";
+                var arrayDefault = Array.prototype.slice.call(field.typeDefault);
                 gen
         ("if(o.bytes===String)d%s=%j", prop, String.fromCharCode.apply(String, field.typeDefault))
         ("else{")
-            ("d%s=%s", prop, arrayDefault)
+            ("d%s=%j", prop, arrayDefault)
             ("if(o.bytes!==Array)d%s=util.newBuffer(d%s)", prop, prop)
         ("}");
             } else gen
@@ -67361,6 +67917,9 @@ converter.toObject = function toObject(mtype) {
     ("if(m%s&&(ks2=Object.keys(m%s)).length){", prop, prop)
         ("d%s={}", prop)
         ("for(var j=0;j<ks2.length;++j){");
+            gen
+        ("if(ks2[j]===\"__proto__\")")
+            ("util.makeProp(d%s,ks2[j])", prop);
             genValuePartial_toObject(gen, field, /* sorted */ index, prop + "[ks2[j]]")
         ("}");
         } else if (field.repeated) { gen
@@ -67409,16 +67968,17 @@ function missing(field) {
  */
 function decoder(mtype) {
     /* eslint-disable no-unexpected-multiline */
-    var gen = util.codegen(["r", "l"], mtype.name + "$decode")
+    var gen = util.codegen(["r", "l", "e", "n"], mtype.name + "$decode")
     ("if(!(r instanceof Reader))")
         ("r=Reader.create(r)")
+    ("if(n===undefined)n=0")
+    ("if(n>Reader.recursionLimit)")
+        ("throw Error(\"maximum nesting depth exceeded\")")
     ("var c=l===undefined?r.len:r.pos+l,m=new this.ctor" + (mtype.fieldsArray.filter(function(field) { return field.map; }).length ? ",k,value" : ""))
     ("while(r.pos<c){")
-        ("var t=r.uint32()");
-    if (mtype.group) gen
-        ("if((t&7)===4)")
-            ("break");
-    gen
+        ("var t=r.uint32()")
+        ("if(t===e)")
+            ("break")
         ("switch(t>>>3){");
 
     var i = 0;
@@ -67452,22 +68012,27 @@ function decoder(mtype) {
                         ("case 2:");
 
             if (types.basic[type] === undefined) gen
-                            ("value=types[%i].decode(r,r.uint32())", i); // can't be groups
+                            ("value=types[%i].decode(r,r.uint32(),undefined,n+1)", i); // can't be groups
             else gen
                             ("value=r.%s()", type);
 
             gen
                             ("break")
                         ("default:")
-                            ("r.skipType(tag2&7)")
+                            ("r.skipType(tag2&7,n)")
                             ("break")
                     ("}")
                 ("}");
 
             if (types.long[field.keyType] !== undefined) gen
                 ("%s[typeof k===\"object\"?util.longToHash(k):k]=value", ref);
-            else gen
+            else {
+                if (field.keyType === "string") gen
+                ("if(k===\"__proto__\")")
+                    ("util.makeProp(%s,k)", ref);
+                gen
                 ("%s[k]=value", ref);
+            }
 
         // Repeated fields
         } else if (field.repeated) { gen
@@ -67484,16 +68049,16 @@ function decoder(mtype) {
                 ("}else");
 
             // Non-packed
-            if (types.basic[type] === undefined) gen(field.resolvedType.group
-                    ? "%s.push(types[%i].decode(r))"
-                    : "%s.push(types[%i].decode(r,r.uint32()))", ref, i);
+            if (types.basic[type] === undefined) gen(field.delimited
+                    ? "%s.push(types[%i].decode(r,undefined,((t&~7)|4),n+1))"
+                    : "%s.push(types[%i].decode(r,r.uint32(),undefined,n+1))", ref, i);
             else gen
                     ("%s.push(r.%s())", ref, type);
 
         // Non-repeated
-        } else if (types.basic[type] === undefined) gen(field.resolvedType.group
-                ? "%s=types[%i].decode(r)"
-                : "%s=types[%i].decode(r,r.uint32())", ref, i);
+        } else if (types.basic[type] === undefined) gen(field.delimited
+                ? "%s=types[%i].decode(r,undefined,((t&~7)|4),n+1)"
+                : "%s=types[%i].decode(r,r.uint32(),undefined,n+1)", ref, i);
         else gen
                 ("%s=r.%s()", ref, type);
         gen
@@ -67502,7 +68067,7 @@ function decoder(mtype) {
         // Unknown fields
     } gen
             ("default:")
-                ("r.skipType(t&7)")
+                ("r.skipType(t&7,n)")
                 ("break")
 
         ("}")
@@ -67545,7 +68110,7 @@ var Enum     = __nccwpck_require__(3528),
  * @ignore
  */
 function genTypePartial(gen, field, fieldIndex, ref) {
-    return field.resolvedType.group
+    return field.delimited
         ? gen("types[%i].encode(%s,w.uint32(%i)).uint32(%i)", fieldIndex, ref, (field.id << 3 | 3) >>> 0, (field.id << 3 | 4) >>> 0)
         : gen("types[%i].encode(%s,w.uint32(%i).fork()).ldelim()", fieldIndex, ref, (field.id << 3 | 2) >>> 0);
 }
@@ -67695,6 +68260,12 @@ function Enum(name, values, options, comment, comments, valuesOptions) {
     this.valuesOptions = valuesOptions;
 
     /**
+     * Resolved values features, if any
+     * @type {Object<string, Object<string, *>>|undefined}
+     */
+    this._valuesFeatures = {};
+
+    /**
      * Reserved ranges, if any.
      * @type {Array.<number[]|string>}
      */
@@ -67706,9 +68277,24 @@ function Enum(name, values, options, comment, comments, valuesOptions) {
 
     if (values)
         for (var keys = Object.keys(values), i = 0; i < keys.length; ++i)
-            if (typeof values[keys[i]] === "number") // use forward entries only
+            if (keys[i] !== "__proto__" && typeof values[keys[i]] === "number") // use forward entries only
                 this.valuesById[ this.values[keys[i]] = values[keys[i]] ] = keys[i];
 }
+
+/**
+ * @override
+ */
+Enum.prototype._resolveFeatures = function _resolveFeatures(edition) {
+    edition = this._edition || edition;
+    ReflectionObject.prototype._resolveFeatures.call(this, edition);
+
+    Object.keys(this.values).forEach(key => {
+        var parentFeaturesCopy = Object.assign({}, this._features);
+        this._valuesFeatures[key] = Object.assign(parentFeaturesCopy, this.valuesOptions && this.valuesOptions[key] && this.valuesOptions[key].features);
+    });
+
+    return this;
+};
 
 /**
  * Enum descriptor.
@@ -67727,6 +68313,9 @@ function Enum(name, values, options, comment, comments, valuesOptions) {
 Enum.fromJSON = function fromJSON(name, json) {
     var enm = new Enum(name, json.values, json.options, json.comment, json.comments);
     enm.reserved = json.reserved;
+    if (json.edition)
+        enm._edition = json.edition;
+    enm._defaultEdition = "proto3";  // For backwards-compatibility.
     return enm;
 };
 
@@ -67738,6 +68327,7 @@ Enum.fromJSON = function fromJSON(name, json) {
 Enum.prototype.toJSON = function toJSON(toJSONOptions) {
     var keepComments = toJSONOptions ? Boolean(toJSONOptions.keepComments) : false;
     return util.toObject([
+        "edition"       , this._editionToJSON(),
         "options"       , this.options,
         "valuesOptions" , this.valuesOptions,
         "values"        , this.values,
@@ -67765,6 +68355,9 @@ Enum.prototype.add = function add(name, id, comment, options) {
 
     if (!util.isInteger(id))
         throw TypeError("id must be an integer");
+
+    if (name === "__proto__")
+        return this;
 
     if (this.values[name] !== undefined)
         throw Error("duplicate name '" + name + "' in " + this);
@@ -67879,7 +68472,11 @@ var ruleRe = /^required|optional|repeated$/;
  * @throws {TypeError} If arguments are invalid
  */
 Field.fromJSON = function fromJSON(name, json) {
-    return new Field(name, json.id, json.type, json.rule, json.extend, json.options, json.comment);
+    var field = new Field(name, json.id, json.type, json.rule, json.extend, json.options, json.comment);
+    if (json.edition)
+        field._edition = json.edition;
+    field._defaultEdition = "proto3";  // For backwards-compatibility.
+    return field;
 };
 
 /**
@@ -67950,18 +68547,6 @@ function Field(name, id, type, rule, extend, options, comment) {
     this.extend = extend || undefined; // toJSON
 
     /**
-     * Whether this field is required.
-     * @type {boolean}
-     */
-    this.required = rule === "required";
-
-    /**
-     * Whether this field is optional.
-     * @type {boolean}
-     */
-    this.optional = !this.required;
-
-    /**
      * Whether this field is repeated.
      * @type {boolean}
      */
@@ -68028,13 +68613,6 @@ function Field(name, id, type, rule, extend, options, comment) {
     this.declaringField = null;
 
     /**
-     * Internally remembers whether this field is packed.
-     * @type {boolean|null}
-     * @private
-     */
-    this._packed = null;
-
-    /**
      * Comment for this field.
      * @type {string|null}
      */
@@ -68042,17 +68620,69 @@ function Field(name, id, type, rule, extend, options, comment) {
 }
 
 /**
- * Determines whether this field is packed. Only relevant when repeated and working with proto2.
+ * Determines whether this field is required.
+ * @name Field#required
+ * @type {boolean}
+ * @readonly
+ */
+Object.defineProperty(Field.prototype, "required", {
+    get: function() {
+        return this._features.field_presence === "LEGACY_REQUIRED";
+    }
+});
+
+/**
+ * Determines whether this field is not required.
+ * @name Field#optional
+ * @type {boolean}
+ * @readonly
+ */
+Object.defineProperty(Field.prototype, "optional", {
+    get: function() {
+        return !this.required;
+    }
+});
+
+/**
+ * Determines whether this field uses tag-delimited encoding.  In proto2 this
+ * corresponded to group syntax.
+ * @name Field#delimited
+ * @type {boolean}
+ * @readonly
+ */
+Object.defineProperty(Field.prototype, "delimited", {
+    get: function() {
+        return this.resolvedType instanceof Type &&
+            this._features.message_encoding === "DELIMITED";
+    }
+});
+
+/**
+ * Determines whether this field is packed. Only relevant when repeated.
  * @name Field#packed
  * @type {boolean}
  * @readonly
  */
 Object.defineProperty(Field.prototype, "packed", {
     get: function() {
-        // defaults to packed=true if not explicity set to false
-        if (this._packed === null)
-            this._packed = this.getOption("packed") !== false;
-        return this._packed;
+        return this._features.repeated_field_encoding === "PACKED";
+    }
+});
+
+/**
+ * Determines whether this field tracks presence.
+ * @name Field#hasPresence
+ * @type {boolean}
+ * @readonly
+ */
+Object.defineProperty(Field.prototype, "hasPresence", {
+    get: function() {
+        if (this.repeated || this.map) {
+            return false;
+        }
+        return this.partOf || // oneofs
+            this.declaringField || this.extensionField || // extensions
+            this._features.field_presence !== "IMPLICIT";
     }
 });
 
@@ -68060,8 +68690,6 @@ Object.defineProperty(Field.prototype, "packed", {
  * @override
  */
 Field.prototype.setOption = function setOption(name, value, ifNotSet) {
-    if (name === "packed") // clear cached before setting
-        this._packed = null;
     return ReflectionObject.prototype.setOption.call(this, name, value, ifNotSet);
 };
 
@@ -68089,6 +68717,7 @@ Field.prototype.setOption = function setOption(name, value, ifNotSet) {
 Field.prototype.toJSON = function toJSON(toJSONOptions) {
     var keepComments = toJSONOptions ? Boolean(toJSONOptions.keepComments) : false;
     return util.toObject([
+        "edition" , this._editionToJSON(),
         "rule"    , this.rule !== "optional" && this.rule || undefined,
         "type"    , this.type,
         "id"      , this.id,
@@ -68128,7 +68757,7 @@ Field.prototype.resolve = function resolve() {
 
     // remove unnecessary options
     if (this.options) {
-        if (this.options.packed === true || this.options.packed !== undefined && this.resolvedType && !(this.resolvedType instanceof Enum))
+        if (this.options.packed !== undefined && this.resolvedType && !(this.resolvedType instanceof Enum))
             delete this.options.packed;
         if (!Object.keys(this.options).length)
             this.options = undefined;
@@ -68164,6 +68793,46 @@ Field.prototype.resolve = function resolve() {
         this.parent.ctor.prototype[this.name] = this.defaultValue;
 
     return ReflectionObject.prototype.resolve.call(this);
+};
+
+/**
+ * Infers field features from legacy syntax that may have been specified differently.
+ * in older editions.
+ * @param {string|undefined} edition The edition this proto is on, or undefined if pre-editions
+ * @returns {object} The feature values to override
+ */
+Field.prototype._inferLegacyProtoFeatures = function _inferLegacyProtoFeatures(edition) {
+    if (edition !== "proto2" && edition !== "proto3") {
+        return {};
+    }
+
+    var features = {};
+
+    if (this.rule === "required") {
+        features.field_presence = "LEGACY_REQUIRED";
+    }
+    if (this.parent && types.defaults[this.type] === undefined) {
+        // We can't use resolvedType because types may not have been resolved yet.  However,
+        // legacy groups are always in the same scope as the field so we don't have to do a
+        // full scan of the tree.
+        var type = this.parent.get(this.type.split(".").pop());
+        if (type && type instanceof Type && type.group) {
+            features.message_encoding = "DELIMITED";
+        }
+    }
+    if (this.getOption("packed") === true) {
+        features.repeated_field_encoding = "PACKED";
+    } else if (this.getOption("packed") === false) {
+        features.repeated_field_encoding = "EXPANDED";
+    }
+    return features;
+};
+
+/**
+ * @override
+ */
+Field.prototype._resolveFeatures = function _resolveFeatures(edition) {
+    return ReflectionObject.prototype._resolveFeatures.call(this, this._edition || edition);
 };
 
 /**
@@ -68552,8 +69221,12 @@ var util = __nccwpck_require__(2857);
 function Message(properties) {
     // not used internally
     if (properties)
-        for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i)
-            this[keys[i]] = properties[keys[i]];
+        for (var keys = Object.keys(properties), i = 0; i < keys.length; ++i) {
+            var key = keys[i];
+            if (key === "__proto__")
+                continue;
+            this[key] = properties[key];
+        }
 }
 
 /**
@@ -68676,6 +69349,7 @@ Message.prototype.toJSON = function toJSON() {
 };
 
 /*eslint-enable valid-jsdoc*/
+
 
 /***/ }),
 
@@ -68961,10 +69635,40 @@ function Namespace(name, options) {
      * @private
      */
     this._nestedArray = null;
+
+    /**
+     * Cache lookup calls for any objects contains anywhere under this namespace.
+     * This drastically speeds up resolve for large cross-linked protos where the same
+     * types are looked up repeatedly.
+     * @type {Object.<string,ReflectionObject|null>}
+     * @private
+     */
+    this._lookupCache = Object.create(null);
+
+    /**
+     * Whether or not objects contained in this namespace need feature resolution.
+     * @type {boolean}
+     * @protected
+     */
+    this._needsRecursiveFeatureResolution = true;
+
+    /**
+     * Whether or not objects contained in this namespace need a resolve.
+     * @type {boolean}
+     * @protected
+     */
+    this._needsRecursiveResolve = true;
 }
 
 function clearCache(namespace) {
     namespace._nestedArray = null;
+    namespace._lookupCache = Object.create(null);
+
+    // Also clear parent caches, since they include nested lookups.
+    var parent = namespace;
+    while(parent = parent.parent) {
+        parent._lookupCache = Object.create(null);
+    }
     return namespace;
 }
 
@@ -69044,8 +69748,9 @@ Namespace.prototype.addJSON = function addJSON(nestedJson) {
  * @returns {ReflectionObject|null} The reflection object or `null` if it doesn't exist
  */
 Namespace.prototype.get = function get(name) {
-    return this.nested && this.nested[name]
-        || null;
+    return this.nested && Object.prototype.hasOwnProperty.call(this.nested, name)
+        ? this.nested[name]
+        : null;
 };
 
 /**
@@ -69056,7 +69761,7 @@ Namespace.prototype.get = function get(name) {
  * @throws {Error} If there is no such enum
  */
 Namespace.prototype.getEnum = function getEnum(name) {
-    if (this.nested && this.nested[name] instanceof Enum)
+    if (this.nested && Object.prototype.hasOwnProperty.call(this.nested, name) && this.nested[name] instanceof Enum)
         return this.nested[name].values;
     throw Error("no such enum: " + name);
 };
@@ -69072,6 +69777,9 @@ Namespace.prototype.add = function add(object) {
 
     if (!(object instanceof Field && object.extend !== undefined || object instanceof Type  || object instanceof OneOf || object instanceof Enum || object instanceof Service || object instanceof Namespace))
         throw TypeError("object must be a valid nested object");
+
+    if (object.name === "__proto__")
+        return this;
 
     if (!this.nested)
         this.nested = {};
@@ -69093,6 +69801,25 @@ Namespace.prototype.add = function add(object) {
         }
     }
     this.nested[object.name] = object;
+
+    if (!(this instanceof Type || this instanceof Service || this instanceof Enum || this instanceof Field)) {
+        // This is a package or a root namespace.
+        if (!object._edition) {
+            // Make sure that some edition is set if it hasn't already been specified.
+            object._edition = object._defaultEdition;
+        }
+    }
+
+    this._needsRecursiveFeatureResolution = true;
+    this._needsRecursiveResolve = true;
+
+    // Also clear parent caches, since they need to recurse down.
+    var parent = this;
+    while(parent = parent.parent) {
+        parent._needsRecursiveFeatureResolution = true;
+        parent._needsRecursiveResolve = true;
+    }
+
     object.onAdd(this);
     return clearCache(this);
 };
@@ -69154,13 +69881,35 @@ Namespace.prototype.define = function define(path, json) {
  * @returns {Namespace} `this`
  */
 Namespace.prototype.resolveAll = function resolveAll() {
+    if (!this._needsRecursiveResolve) return this;
+
+    this._resolveFeaturesRecursive(this._edition);
+
     var nested = this.nestedArray, i = 0;
+    this.resolve();
     while (i < nested.length)
         if (nested[i] instanceof Namespace)
             nested[i++].resolveAll();
         else
             nested[i++].resolve();
-    return this.resolve();
+    this._needsRecursiveResolve = false;
+    return this;
+};
+
+/**
+ * @override
+ */
+Namespace.prototype._resolveFeaturesRecursive = function _resolveFeaturesRecursive(edition) {
+    if (!this._needsRecursiveFeatureResolution) return this;
+    this._needsRecursiveFeatureResolution = false;
+
+    edition = this._edition || edition;
+
+    ReflectionObject.prototype._resolveFeaturesRecursive.call(this, edition);
+    this.nestedArray.forEach(nested => {
+        nested._resolveFeaturesRecursive(edition);
+    });
+    return this;
 };
 
 /**
@@ -69171,7 +69920,6 @@ Namespace.prototype.resolveAll = function resolveAll() {
  * @returns {ReflectionObject|null} Looked up object or `null` if none could be found
  */
 Namespace.prototype.lookup = function lookup(path, filterTypes, parentAlreadyChecked) {
-
     /* istanbul ignore next */
     if (typeof filterTypes === "boolean") {
         parentAlreadyChecked = filterTypes;
@@ -69186,29 +69934,72 @@ Namespace.prototype.lookup = function lookup(path, filterTypes, parentAlreadyChe
     } else if (!path.length)
         return this;
 
+    var flatPath = path.join(".");
+
     // Start at root if path is absolute
     if (path[0] === "")
         return this.root.lookup(path.slice(1), filterTypes);
 
+    // Early bailout for objects with matching absolute paths
+    var found = this.root._fullyQualifiedObjects && this.root._fullyQualifiedObjects["." + flatPath];
+    if (found && (!filterTypes || filterTypes.indexOf(found.constructor) > -1)) {
+        return found;
+    }
+
+    // Do a regular lookup at this namespace and below
+    found = this._lookupImpl(path, flatPath);
+    if (found && (!filterTypes || filterTypes.indexOf(found.constructor) > -1)) {
+        return found;
+    }
+
+    if (parentAlreadyChecked)
+        return null;
+
+    // If there hasn't been a match, walk up the tree and look more broadly
+    var current = this;
+    while (current.parent) {
+        found = current.parent._lookupImpl(path, flatPath);
+        if (found && (!filterTypes || filterTypes.indexOf(found.constructor) > -1)) {
+            return found;
+        }
+        current = current.parent;
+    }
+    return null;
+};
+
+/**
+ * Internal helper for lookup that handles searching just at this namespace and below along with caching.
+ * @param {string[]} path Path to look up
+ * @param {string} flatPath Flattened version of the path to use as a cache key
+ * @returns {ReflectionObject|null} Looked up object or `null` if none could be found
+ * @private
+ */
+Namespace.prototype._lookupImpl = function lookup(path, flatPath) {
+    if(Object.prototype.hasOwnProperty.call(this._lookupCache, flatPath)) {
+        return this._lookupCache[flatPath];
+    }
+
     // Test if the first part matches any nested object, and if so, traverse if path contains more
     var found = this.get(path[0]);
+    var exact = null;
     if (found) {
         if (path.length === 1) {
-            if (!filterTypes || filterTypes.indexOf(found.constructor) > -1)
-                return found;
-        } else if (found instanceof Namespace && (found = found.lookup(path.slice(1), filterTypes, true)))
-            return found;
+            exact = found;
+        } else if (found instanceof Namespace) {
+            path = path.slice(1);
+            exact = found._lookupImpl(path, path.join("."));
+        }
 
     // Otherwise try each nested namespace
-    } else
+    } else {
         for (var i = 0; i < this.nestedArray.length; ++i)
-            if (this._nestedArray[i] instanceof Namespace && (found = this._nestedArray[i].lookup(path, filterTypes, true)))
-                return found;
+            if (this._nestedArray[i] instanceof Namespace && (found = this._nestedArray[i]._lookupImpl(path, flatPath)))
+                exact = found;
+    }
 
-    // If there hasn't been a match, try again at the parent
-    if (this.parent === null || parentAlreadyChecked)
-        return null;
-    return this.parent.lookup(path, filterTypes);
+    // Set this even when null, so that when we walk up the tree we can quickly bail on repeated checks back down.
+    this._lookupCache[flatPath] = exact;
+    return exact;
 };
 
 /**
@@ -69297,9 +70088,16 @@ module.exports = ReflectionObject;
 
 ReflectionObject.className = "ReflectionObject";
 
+const OneOf = __nccwpck_require__(4624);
 var util = __nccwpck_require__(9609);
 
 var Root; // cyclic
+
+/* eslint-disable no-warning-comments */
+// TODO: Replace with embedded proto.
+var editions2023Defaults = {enum_type: "OPEN", field_presence: "EXPLICIT", json_format: "ALLOW", message_encoding: "LENGTH_PREFIXED", repeated_field_encoding: "PACKED", utf8_validation: "VERIFY"};
+var proto2Defaults = {enum_type: "CLOSED", field_presence: "EXPLICIT", json_format: "LEGACY_BEST_EFFORT", message_encoding: "LENGTH_PREFIXED", repeated_field_encoding: "EXPANDED", utf8_validation: "NONE"};
+var proto3Defaults = {enum_type: "OPEN", field_presence: "IMPLICIT", json_format: "ALLOW", message_encoding: "LENGTH_PREFIXED", repeated_field_encoding: "PACKED", utf8_validation: "VERIFY"};
 
 /**
  * Constructs a new reflection object instance.
@@ -69334,6 +70132,35 @@ function ReflectionObject(name, options) {
      * @type {string}
      */
     this.name = name;
+
+    /**
+     * The edition specified for this object.  Only relevant for top-level objects.
+     * @type {string}
+     * @private
+     */
+    this._edition = null;
+
+    /**
+     * The default edition to use for this object if none is specified.  For legacy reasons,
+     * this is proto2 except in the JSON parsing case where it was proto3.
+     * @type {string}
+     * @private
+     */
+    this._defaultEdition = "proto2";
+
+    /**
+     * Resolved Features.
+     * @type {object}
+     * @private
+     */
+    this._features = {};
+
+    /**
+     * Whether or not features have been resolved.
+     * @type {boolean}
+     * @private
+     */
+    this._featuresResolved = false;
 
     /**
      * Parent namespace.
@@ -69446,6 +70273,83 @@ ReflectionObject.prototype.resolve = function resolve() {
 };
 
 /**
+ * Resolves this objects editions features.
+ * @param {string} edition The edition we're currently resolving for.
+ * @returns {ReflectionObject} `this`
+ */
+ReflectionObject.prototype._resolveFeaturesRecursive = function _resolveFeaturesRecursive(edition) {
+    return this._resolveFeatures(this._edition || edition);
+};
+
+/**
+ * Resolves child features from parent features
+ * @param {string} edition The edition we're currently resolving for.
+ * @returns {undefined}
+ */
+ReflectionObject.prototype._resolveFeatures = function _resolveFeatures(edition) {
+    if (this._featuresResolved) {
+        return;
+    }
+
+    var defaults = {};
+
+    /* istanbul ignore if */
+    if (!edition) {
+        throw new Error("Unknown edition for " + this.fullName);
+    }
+
+    var protoFeatures = Object.assign(this.options ? Object.assign({},  this.options.features) : {},
+        this._inferLegacyProtoFeatures(edition));
+
+    if (this._edition) {
+        // For a namespace marked with a specific edition, reset defaults.
+        /* istanbul ignore else */
+        if (edition === "proto2") {
+            defaults = Object.assign({}, proto2Defaults);
+        } else if (edition === "proto3") {
+            defaults = Object.assign({}, proto3Defaults);
+        } else if (edition === "2023") {
+            defaults = Object.assign({}, editions2023Defaults);
+        } else {
+            throw new Error("Unknown edition: " + edition);
+        }
+        this._features = Object.assign(defaults, protoFeatures || {});
+        this._featuresResolved = true;
+        return;
+    }
+
+    // fields in Oneofs aren't actually children of them, so we have to
+    // special-case it
+    /* istanbul ignore else */
+    if (this.partOf instanceof OneOf) {
+        var lexicalParentFeaturesCopy = Object.assign({}, this.partOf._features);
+        this._features = Object.assign(lexicalParentFeaturesCopy, protoFeatures || {});
+    } else if (this.declaringField) {
+        // Skip feature resolution of sister fields.
+    } else if (this.parent) {
+        var parentFeaturesCopy = Object.assign({}, this.parent._features);
+        this._features = Object.assign(parentFeaturesCopy, protoFeatures || {});
+    } else {
+        throw new Error("Unable to find a parent for " + this.fullName);
+    }
+    if (this.extensionField) {
+        // Sister fields should have the same features as their extensions.
+        this.extensionField._features = this._features;
+    }
+    this._featuresResolved = true;
+};
+
+/**
+ * Infers features from legacy syntax that may have been specified differently.
+ * in older editions.
+ * @param {string|undefined} edition The edition this proto is on, or undefined if pre-editions
+ * @returns {object} The feature values to override
+ */
+ReflectionObject.prototype._inferLegacyProtoFeatures = function _inferLegacyProtoFeatures(/*edition*/) {
+    return {};
+};
+
+/**
  * Gets an option value.
  * @param {string} name Option name
  * @returns {*} Option value or `undefined` if not set
@@ -69460,12 +70364,21 @@ ReflectionObject.prototype.getOption = function getOption(name) {
  * Sets an option.
  * @param {string} name Option name
  * @param {*} value Option value
- * @param {boolean} [ifNotSet] Sets the option only if it isn't currently set
+ * @param {boolean|undefined} [ifNotSet] Sets the option only if it isn't currently set
  * @returns {ReflectionObject} `this`
  */
 ReflectionObject.prototype.setOption = function setOption(name, value, ifNotSet) {
-    if (!ifNotSet || !this.options || this.options[name] === undefined)
-        (this.options || (this.options = {}))[name] = value;
+    if (name === "__proto__")
+        return this;
+    if (!this.options)
+        this.options = {};
+    if (/^features\./.test(name)) {
+        util.setProperty(this.options, name, value, ifNotSet);
+    } else if (!ifNotSet || this.options[name] === undefined) {
+        if (this.getOption(name) !== value) this.resolved = false;
+        this.options[name] = value;
+    }
+
     return this;
 };
 
@@ -69477,6 +70390,8 @@ ReflectionObject.prototype.setOption = function setOption(name, value, ifNotSet)
  * @returns {ReflectionObject} `this`
  */
 ReflectionObject.prototype.setParsedOption = function setParsedOption(name, value, propName) {
+    if (name === "__proto__")
+        return this;
     if (!this.parsedOptions) {
         this.parsedOptions = [];
     }
@@ -69489,10 +70404,11 @@ ReflectionObject.prototype.setParsedOption = function setParsedOption(name, valu
         });
         if (opt) {
             // If we found an existing option - just merge the property value
+            // (If it's a feature, will just write over)
             var newValue = opt[name];
             util.setProperty(newValue, propName, value);
         } else {
-            // otherwise, create a new option, set it's property and add it to the list
+            // otherwise, create a new option, set its property and add it to the list
             opt = {};
             opt[name] = util.setProperty({}, propName, value);
             parsedOptions.push(opt);
@@ -69503,6 +70419,7 @@ ReflectionObject.prototype.setParsedOption = function setParsedOption(name, valu
         newOpt[name] = value;
         parsedOptions.push(newOpt);
     }
+
     return this;
 };
 
@@ -69529,6 +70446,19 @@ ReflectionObject.prototype.toString = function toString() {
     if (fullName.length)
         return className + " " + fullName;
     return className;
+};
+
+/**
+ * Converts the edition this object is pinned to for JSON format.
+ * @returns {string|undefined} The edition string for JSON representation
+ */
+ReflectionObject.prototype._editionToJSON = function _editionToJSON() {
+    if (!this._edition || this._edition === "proto3") {
+        // Avoid emitting proto3 since we need to default to it for backwards
+        // compatibility anyway.
+        return undefined;
+    }
+    return this._edition;
 };
 
 // Sets up cyclic dependencies (called in index-light)
@@ -69717,6 +70647,25 @@ OneOf.prototype.onRemove = function onRemove(parent) {
 };
 
 /**
+ * Determines whether this field corresponds to a synthetic oneof created for
+ * a proto3 optional field.  No behavioral logic should depend on this, but it
+ * can be relevant for reflection.
+ * @name OneOf#isProto3Optional
+ * @type {boolean}
+ * @readonly
+ */
+Object.defineProperty(OneOf.prototype, "isProto3Optional", {
+    get: function() {
+        if (this.fieldsArray == null || this.fieldsArray.length !== 1) {
+            return false;
+        }
+
+        var field = this.fieldsArray[0];
+        return field.options != null && field.options["proto3_optional"] === true;
+    }
+});
+
+/**
  * Decorator function as returned by {@link OneOf.d} (TypeScript).
  * @typedef OneOfDecorator
  * @type {function}
@@ -69769,6 +70718,7 @@ var tokenize  = __nccwpck_require__(580),
     Enum      = __nccwpck_require__(3528),
     Service   = __nccwpck_require__(338),
     Method    = __nccwpck_require__(9988),
+    ReflectionObject = __nccwpck_require__(7946),
     types     = __nccwpck_require__(1024),
     util      = __nccwpck_require__(9609);
 
@@ -69778,10 +70728,9 @@ var base10Re    = /^[1-9][0-9]*$/,
     base16NegRe = /^-?0[x][0-9a-fA-F]+$/,
     base8Re     = /^0[0-7]+$/,
     base8NegRe  = /^-?0[0-7]+$/,
-    numberRe    = /^(?![eE])[0-9]*(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?$/,
+    numberRe    = util.patterns.numberRe,
     nameRe      = /^[a-zA-Z_][a-zA-Z_0-9]*$/,
-    typeRefRe   = /^(?:\.?[a-zA-Z_][a-zA-Z_0-9]*)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)*$/,
-    fqTypeRefRe = /^(?:\.[a-zA-Z_][a-zA-Z_0-9]*)+$/;
+    typeRefRe   = util.patterns.typeRefRe;
 
 /**
  * Result object returned from {@link parse}.
@@ -69789,7 +70738,6 @@ var base10Re    = /^[1-9][0-9]*$/,
  * @property {string|undefined} package Package name, if declared
  * @property {string[]|undefined} imports Imports, if any
  * @property {string[]|undefined} weakImports Weak imports, if any
- * @property {string|undefined} syntax Syntax, if specified (either `"proto2"` or `"proto3"`)
  * @property {Root} root Populated root instance
  */
 
@@ -69837,12 +70785,24 @@ function parse(source, root, options) {
         pkg,
         imports,
         weakImports,
-        syntax,
-        isProto3 = false;
+        edition = "proto2";
 
     var ptr = root;
 
+    var topLevelObjects = [];
+    var topLevelOptions = {};
+
     var applyCase = options.keepCase ? function(name) { return name; } : util.camelCase;
+
+    function resolveFileFeatures() {
+        topLevelObjects.forEach(obj => {
+            obj._edition = edition;
+            Object.keys(topLevelOptions).forEach(opt => {
+                if (obj.getOption(opt) !== undefined) return;
+                obj.setOption(opt, topLevelOptions[opt], true);
+            });
+        });
+    }
 
     /* istanbul ignore next */
     function illegal(token, name, insideTryCatch) {
@@ -69882,7 +70842,6 @@ function parse(source, root, options) {
         try {
             return parseNumber(token, /* insideTryCatch */ true);
         } catch (e) {
-
             /* istanbul ignore else */
             if (acceptTypeRef && typeRefRe.test(token))
                 return token;
@@ -69895,10 +70854,23 @@ function parse(source, root, options) {
     function readRanges(target, acceptStrings) {
         var token, start;
         do {
-            if (acceptStrings && ((token = peek()) === "\"" || token === "'"))
-                target.push(readString());
-            else
-                target.push([ start = parseId(next()), skip("to", true) ? parseId(next()) : start ]);
+            if (acceptStrings && ((token = peek()) === "\"" || token === "'")) {
+                var str = readString();
+                target.push(str);
+                if (edition >= 2023) {
+                    throw illegal(str, "id");
+                }
+            } else {
+                try {
+                    target.push([ start = parseId(next()), skip("to", true) ? parseId(next()) : start ]);
+                } catch (err) {
+                    if (acceptStrings && typeRefRe.test(token) && edition >= 2023) {
+                        target.push(token);
+                    } else {
+                        throw err;
+                    }
+                }
+            }
         } while (skip(",", true));
         var dummy = {options: undefined};
         dummy.setOption = function(name, value) {
@@ -69975,7 +70947,6 @@ function parse(source, root, options) {
     }
 
     function parsePackage() {
-
         /* istanbul ignore if */
         if (pkg !== undefined)
             throw illegal("package");
@@ -69987,6 +70958,7 @@ function parse(source, root, options) {
             throw illegal(pkg, "name");
 
         ptr = ptr.define(pkg);
+
         skip(";");
     }
 
@@ -70012,19 +70984,27 @@ function parse(source, root, options) {
 
     function parseSyntax() {
         skip("=");
-        syntax = readString();
-        isProto3 = syntax === "proto3";
+        edition = readString();
 
         /* istanbul ignore if */
-        if (!isProto3 && syntax !== "proto2")
-            throw illegal(syntax, "syntax");
-
-        // Syntax is needed to understand the meaning of the optional field rule
-        // Otherwise the meaning is ambiguous between proto2 and proto3
-        root.setOption("syntax", syntax);
+        if (edition < 2023)
+            throw illegal(edition, "syntax");
 
         skip(";");
     }
+
+    function parseEdition() {
+        skip("=");
+        edition = readString();
+        const supportedEditions = ["2023"];
+
+        /* istanbul ignore if */
+        if (!supportedEditions.includes(edition))
+            throw illegal(edition, "edition");
+
+        skip(";");
+    }
+
 
     function parseCommon(parent, token) {
         switch (token) {
@@ -70093,14 +71073,19 @@ function parse(source, root, options) {
                     break;
 
                 case "required":
+                    if (edition !== "proto2")
+                        throw illegal(token);
+                /* eslint-disable no-fallthrough */
                 case "repeated":
                     parseField(type, token);
                     break;
 
                 case "optional":
                     /* istanbul ignore if */
-                    if (isProto3) {
+                    if (edition === "proto3") {
                         parseField(type, "proto3_optional");
+                    } else if (edition !== "proto2") {
+                        throw illegal(token);
                     } else {
                         parseField(type, "optional");
                     }
@@ -70120,8 +71105,9 @@ function parse(source, root, options) {
 
                 default:
                     /* istanbul ignore if */
-                    if (!isProto3 || !typeRefRe.test(token))
+                    if (edition === "proto2" || !typeRefRe.test(token)) {
                         throw illegal(token);
+                    }
 
                     push(token);
                     parseField(type, "optional");
@@ -70129,6 +71115,9 @@ function parse(source, root, options) {
             }
         });
         parent.add(type);
+        if (parent === ptr) {
+            topLevelObjects.push(type);
+        }
     }
 
     function parseField(parent, rule, extend) {
@@ -70155,6 +71144,7 @@ function parse(source, root, options) {
         var name = next();
 
         /* istanbul ignore if */
+
         if (!nameRe.test(name))
             throw illegal(name, "name");
 
@@ -70162,6 +71152,7 @@ function parse(source, root, options) {
         skip("=");
 
         var field = new Field(name, parseId(next()), type, rule, extend);
+
         ifBlock(field, function parseField_block(token) {
 
             /* istanbul ignore else */
@@ -70184,15 +71175,15 @@ function parse(source, root, options) {
         } else {
             parent.add(field);
         }
-
-        // JSON defaults to packed=true if not set so we have to set packed=false explicity when
-        // parsing proto2 descriptors without the option, where applicable. This must be done for
-        // all known packable types and anything that could be an enum (= is not a basic type).
-        if (!isProto3 && field.repeated && (types.packed[type] !== undefined || types.basic[type] === undefined))
-            field.setOption("packed", false, /* ifNotSet */ true);
+        if (parent === ptr) {
+            topLevelObjects.push(field);
+        }
     }
 
     function parseGroup(parent, rule) {
+        if (edition >= 2023) {
+            throw illegal("group");
+        }
         var name = next();
 
         /* istanbul ignore if */
@@ -70215,7 +71206,6 @@ function parse(source, root, options) {
                     parseOption(type, token);
                     skip(";");
                     break;
-
                 case "required":
                 case "repeated":
                     parseField(type, token);
@@ -70223,7 +71213,7 @@ function parse(source, root, options) {
 
                 case "optional":
                     /* istanbul ignore if */
-                    if (isProto3) {
+                    if (edition === "proto3") {
                         parseField(type, "proto3_optional");
                     } else {
                         parseField(type, "optional");
@@ -70236,6 +71226,10 @@ function parse(source, root, options) {
 
                 case "enum":
                     parseEnum(type, token);
+                    break;
+
+                case "reserved":
+                    readRanges(type.reserved || (type.reserved = []), true);
                     break;
 
                 /* istanbul ignore next */
@@ -70321,6 +71315,7 @@ function parse(source, root, options) {
 
             case "reserved":
               readRanges(enm.reserved || (enm.reserved = []), true);
+              if(enm.reserved === undefined) enm.reserved = [];
               break;
 
             default:
@@ -70328,6 +71323,9 @@ function parse(source, root, options) {
           }
         });
         parent.add(enm);
+        if (parent === ptr) {
+            topLevelObjects.push(enm);
+        }
     }
 
     function parseEnumValue(parent, token) {
@@ -70341,10 +71339,14 @@ function parse(source, root, options) {
             dummy = {
                 options: undefined
             };
+        dummy.getOption = function(name) {
+            return this.options[name];
+        };
         dummy.setOption = function(name, value) {
-            if (this.options === undefined)
-                this.options = {};
-            this.options[name] = value;
+            ReflectionObject.prototype.setOption.call(dummy, name, value);
+        };
+        dummy.setParsedOption = function() {
+            return undefined;
         };
         ifBlock(dummy, function parseEnumValue_block(token) {
 
@@ -70358,34 +71360,42 @@ function parse(source, root, options) {
         }, function parseEnumValue_line() {
             parseInlineOptions(dummy); // skip
         });
-        parent.add(token, value, dummy.comment, dummy.options);
+        parent.add(token, value, dummy.comment, dummy.parsedOptions || dummy.options);
     }
 
     function parseOption(parent, token) {
-        var isCustom = skip("(", true);
-
-        /* istanbul ignore if */
-        if (!typeRefRe.test(token = next()))
-            throw illegal(token, "name");
-
-        var name = token;
-        var option = name;
-        var propName;
-
-        if (isCustom) {
-            skip(")");
-            name = "(" + name + ")";
-            option = name;
-            token = peek();
-            if (fqTypeRefRe.test(token)) {
-                propName = token.slice(1); //remove '.' before property name
-                name += token;
-                next();
+            var option;
+            var propName;
+            var isOption = true;
+            if (token === "option") {
+                token = next();
             }
-        }
-        skip("=");
-        var optionValue = parseOptionValue(parent, name);
-        setParsedOption(parent, option, optionValue, propName);
+
+            while (token !== "=") {
+                if (token === "(") {
+                    var parensValue = next();
+                    skip(")");
+                    token = "(" + parensValue + ")";
+                }
+                if (isOption) {
+                    isOption = false;
+                    if (token.includes(".") && !token.includes("(")) {
+                        var tokens = token.split(".");
+                        option = tokens[0] + ".";
+                        token = tokens[1];
+                        continue;
+                    }
+                    option = token;
+                } else {
+                    propName = propName ? propName += token : token;
+                }
+                token = next();
+            }
+            var name = propName ? option.concat(propName) : option;
+            var optionValue = parseOptionValue(parent, name);
+            propName = propName && propName[0] === "." ? propName.slice(1) : propName;
+            option = option && option[option.length - 1] === "." ? option.slice(0, -1) : option;
+            setParsedOption(parent, option, optionValue, propName);
     }
 
     function parseOptionValue(parent, name) {
@@ -70407,12 +71417,12 @@ function parse(source, root, options) {
 
                 skip(":", true);
 
-                if (peek() === "{")
-                    value = parseOptionValue(parent, name + "." + token);
-                else if (peek() === "[") {
+                if (peek() === "{") {
                     // option (my_option) = {
                     //     repeated_value: [ "foo", "bar" ]
                     // };
+                    value = parseOptionValue(parent, name + "." + token);
+                } else if (peek() === "[") {
                     value = [];
                     var lastValue;
                     if (skip("[", true)) {
@@ -70435,7 +71445,8 @@ function parse(source, root, options) {
                 if (prevValue)
                     value = [].concat(prevValue).concat(value);
 
-                objectResult[propName] = value;
+                if (propName !== "__proto__")
+                    objectResult[propName] = value;
 
                 // Semicolons and commas can be optional
                 skip(",", true);
@@ -70452,6 +71463,10 @@ function parse(source, root, options) {
     }
 
     function setOption(parent, name, value) {
+        if (ptr === parent && /^features\./.test(name)) {
+            topLevelOptions[name] = value;
+            return;
+        }
         if (parent.setOption)
             parent.setOption(name, value);
     }
@@ -70479,8 +71494,9 @@ function parse(source, root, options) {
 
         var service = new Service(token);
         ifBlock(service, function parseService_block(token) {
-            if (parseCommon(service, token))
+            if (parseCommon(service, token)) {
                 return;
+            }
 
             /* istanbul ignore else */
             if (token === "rpc")
@@ -70489,6 +71505,9 @@ function parse(source, root, options) {
                 throw illegal(token);
         });
         parent.add(service);
+        if (parent === ptr) {
+            topLevelObjects.push(service);
+        }
     }
 
     function parseMethod(parent, token) {
@@ -70558,7 +71577,7 @@ function parse(source, root, options) {
 
                 case "optional":
                     /* istanbul ignore if */
-                    if (isProto3) {
+                    if (edition === "proto3") {
                         parseField(parent, "proto3_optional", reference);
                     } else {
                         parseField(parent, "optional", reference);
@@ -70567,7 +71586,7 @@ function parse(source, root, options) {
 
                 default:
                     /* istanbul ignore if */
-                    if (!isProto3 || !typeRefRe.test(token))
+                    if (edition === "proto2" || !typeRefRe.test(token))
                         throw illegal(token);
                     push(token);
                     parseField(parent, "optional", reference);
@@ -70607,10 +71626,16 @@ function parse(source, root, options) {
                 parseSyntax();
                 break;
 
-            case "option":
+            case "edition":
+                /* istanbul ignore if */
+                if (!head)
+                    throw illegal(token);
+                parseEdition();
+                break;
 
+            case "option":
                 parseOption(ptr, token);
-                skip(";");
+                skip(";", true);
                 break;
 
             default:
@@ -70626,12 +71651,13 @@ function parse(source, root, options) {
         }
     }
 
+    resolveFileFeatures();
+
     parse.filename = null;
     return {
         "package"     : pkg,
         "imports"     : imports,
          weakImports  : weakImports,
-         syntax       : syntax,
          root         : root
     };
 }
@@ -71010,11 +72036,21 @@ Reader.prototype.skip = function skip(length) {
 };
 
 /**
+ * Recursion limit.
+ * @type {number}
+ */
+Reader.recursionLimit = util.recursionLimit;
+
+/**
  * Skips the next element of the specified wire type.
  * @param {number} wireType Wire type received
+ * @param {number} [depth] Depth of recursion to control nested calls; 0 if omitted
  * @returns {Reader} `this`
  */
-Reader.prototype.skipType = function(wireType) {
+Reader.prototype.skipType = function(wireType, depth) {
+    if (depth === undefined) depth = 0;
+    if (depth > Reader.recursionLimit)
+        throw Error("maximum nesting depth exceeded");
     switch (wireType) {
         case 0:
             this.skip();
@@ -71027,7 +72063,7 @@ Reader.prototype.skipType = function(wireType) {
             break;
         case 3:
             while ((wireType = this.uint32() & 7) !== 4) {
-                this.skipType(wireType);
+                this.skipType(wireType, depth + 1);
             }
             break;
         case 5:
@@ -71175,11 +72211,25 @@ function Root(options) {
      * @type {string[]}
      */
     this.files = [];
+
+    /**
+     * Edition, defaults to proto2 if unspecified.
+     * @type {string}
+     * @private
+     */
+    this._edition = "proto2";
+
+    /**
+     * Global lookup cache of fully qualified names.
+     * @type {Object.<string,ReflectionObject>}
+     * @private
+     */
+    this._fullyQualifiedObjects = {};
 }
 
 /**
  * Loads a namespace descriptor into a root namespace.
- * @param {INamespace} json Nameespace descriptor
+ * @param {INamespace} json Namespace descriptor
  * @param {Root} [root] Root namespace, defaults to create a new one if omitted
  * @returns {Root} Root namespace
  */
@@ -71188,7 +72238,7 @@ Root.fromJSON = function fromJSON(json, root) {
         root = new Root();
     if (json.options)
         root.setOptions(json.options);
-    return root.addJSON(json.nested);
+    return root.addJSON(json.nested).resolveAll();
 };
 
 /**
@@ -71228,18 +72278,24 @@ Root.prototype.load = function load(filename, options, callback) {
         options = undefined;
     }
     var self = this;
-    if (!callback)
+    if (!callback) {
         return util.asPromise(load, self, filename, options);
+    }
 
     var sync = callback === SYNC; // undocumented
 
     // Finishes loading by calling the callback (exactly once)
     function finish(err, root) {
         /* istanbul ignore if */
-        if (!callback)
+        if (!callback) {
             return;
-        if (sync)
+        }
+        if (sync) {
             throw err;
+        }
+        if (root) {
+            root.resolveAll();
+        }
         var cb = callback;
         callback = null;
         cb(err, root);
@@ -71279,8 +72335,9 @@ Root.prototype.load = function load(filename, options, callback) {
         } catch (err) {
             finish(err);
         }
-        if (!sync && !queued)
+        if (!sync && !queued) {
             finish(null, self); // only once anyway
+        }
     }
 
     // Fetches a single file
@@ -71288,15 +72345,16 @@ Root.prototype.load = function load(filename, options, callback) {
         filename = getBundledFileName(filename) || filename;
 
         // Skip if already loaded / attempted
-        if (self.files.indexOf(filename) > -1)
+        if (self.files.indexOf(filename) > -1) {
             return;
+        }
         self.files.push(filename);
 
         // Shortcut bundled definitions
         if (filename in common) {
-            if (sync)
+            if (sync) {
                 process(filename, common[filename]);
-            else {
+            } else {
                 ++queued;
                 setTimeout(function() {
                     --queued;
@@ -71322,8 +72380,9 @@ Root.prototype.load = function load(filename, options, callback) {
             self.fetch(filename, function(err, source) {
                 --queued;
                 /* istanbul ignore if */
-                if (!callback)
+                if (!callback) {
                     return; // terminated meanwhile
+                }
                 if (err) {
                     /* istanbul ignore else */
                     if (!weak)
@@ -71340,17 +72399,21 @@ Root.prototype.load = function load(filename, options, callback) {
 
     // Assembling the root namespace doesn't require working type
     // references anymore, so we can load everything in parallel
-    if (util.isString(filename))
+    if (util.isString(filename)) {
         filename = [ filename ];
+    }
     for (var i = 0, resolved; i < filename.length; ++i)
         if (resolved = self.resolvePath("", filename[i]))
             fetch(resolved);
-
-    if (sync)
+    if (sync) {
+        self.resolveAll();
         return self;
-    if (!queued)
+    }
+    if (!queued) {
         finish(null, self);
-    return undefined;
+    }
+
+    return self;
 };
 // function load(filename:string, options:IParseOptions, callback:LoadCallback):undefined
 
@@ -71392,6 +72455,8 @@ Root.prototype.loadSync = function loadSync(filename, options) {
  * @override
  */
 Root.prototype.resolveAll = function resolveAll() {
+    if (!this._needsRecursiveResolve) return this;
+
     if (this.deferred.length)
         throw Error("unresolvable extensions: " + this.deferred.map(function(field) {
             return "'extend " + field.extend + "' in " + field.parent.fullName;
@@ -71458,6 +72523,11 @@ Root.prototype._handleAdd = function _handleAdd(object) {
             object.parent[object.name] = object; // expose namespace as property of its parent
     }
 
+    if (object instanceof Type || object instanceof Enum || object instanceof Field) {
+        // Only store types and enums for quick lookup during resolve.
+        this._fullyQualifiedObjects[object.fullName] = object;
+    }
+
     // The above also adds uppercased (and thus conflict-free) nested types, services and enums as
     // properties of namespaces just like static code does. This allows using a .d.ts generated for
     // a static module with reflection-based solutions where the condition is met.
@@ -71498,6 +72568,8 @@ Root.prototype._handleRemove = function _handleRemove(object) {
             delete object.parent[object.name]; // unexpose namespaces
 
     }
+
+    delete this._fullyQualifiedObjects[object.fullName];
 };
 
 // Sets up cyclic dependencies (called in index-light)
@@ -71745,6 +72817,8 @@ var Method = __nccwpck_require__(9988),
     util   = __nccwpck_require__(9609),
     rpc    = __nccwpck_require__(9882);
 
+var reservedRe = util.patterns.reservedRe;
+
 /**
  * Constructs a new service instance.
  * @classdesc Reflected service.
@@ -71793,7 +72867,10 @@ Service.fromJSON = function fromJSON(name, json) {
             service.add(Method.fromJSON(names[i], json.methods[names[i]]));
     if (json.nested)
         service.addJSON(json.nested);
+    if (json.edition)
+        service._edition = json.edition;
     service.comment = json.comment;
+    service._defaultEdition = "proto3";  // For backwards-compatibility.
     return service;
 };
 
@@ -71806,6 +72883,7 @@ Service.prototype.toJSON = function toJSON(toJSONOptions) {
     var inherited = Namespace.prototype.toJSON.call(this, toJSONOptions);
     var keepComments = toJSONOptions ? Boolean(toJSONOptions.keepComments) : false;
     return util.toObject([
+        "edition" , this._editionToJSON(),
         "options" , inherited && inherited.options || undefined,
         "methods" , Namespace.arrayToJSON(this.methodsArray, toJSONOptions) || /* istanbul ignore next */ {},
         "nested"  , inherited && inherited.nested || undefined,
@@ -71834,30 +72912,50 @@ function clearCache(service) {
  * @override
  */
 Service.prototype.get = function get(name) {
-    return this.methods[name]
-        || Namespace.prototype.get.call(this, name);
+    return Object.prototype.hasOwnProperty.call(this.methods, name)
+        ? this.methods[name]
+        : Namespace.prototype.get.call(this, name);
 };
 
 /**
  * @override
  */
 Service.prototype.resolveAll = function resolveAll() {
+    if (!this._needsRecursiveResolve) return this;
+
+    Namespace.prototype.resolve.call(this);
     var methods = this.methodsArray;
     for (var i = 0; i < methods.length; ++i)
         methods[i].resolve();
-    return Namespace.prototype.resolve.call(this);
+    return this;
+};
+
+/**
+ * @override
+ */
+Service.prototype._resolveFeaturesRecursive = function _resolveFeaturesRecursive(edition) {
+    if (!this._needsRecursiveFeatureResolution) return this;
+
+    edition = this._edition || edition;
+
+    Namespace.prototype._resolveFeaturesRecursive.call(this, edition);
+    this.methodsArray.forEach(method => {
+        method._resolveFeaturesRecursive(edition);
+    });
+    return this;
 };
 
 /**
  * @override
  */
 Service.prototype.add = function add(object) {
-
     /* istanbul ignore if */
     if (this.get(object.name))
         throw Error("duplicate name '" + object.name + "' in " + this);
 
     if (object instanceof Method) {
+        if (object.name === "__proto__")
+            return this;
         this.methods[object.name] = object;
         object.parent = this;
         return clearCache(this);
@@ -71893,7 +72991,7 @@ Service.prototype.create = function create(rpcImpl, requestDelimited, responseDe
     var rpcService = new rpc.Service(rpcImpl, requestDelimited, responseDelimited);
     for (var i = 0, method; i < /* initializes */ this.methodsArray.length; ++i) {
         var methodName = util.lcFirst((method = this._methodsArray[i]).resolve().name).replace(/[^$\w_]/g, "");
-        rpcService[methodName] = util.codegen(["r","c"], util.isReserved(methodName) ? methodName + "_" : methodName)("return this.rpcCall(m,q,s,r,c)")({
+        rpcService[methodName] = util.codegen(["r","c"], reservedRe.test(methodName) ? methodName + "_" : methodName)("return this.rpcCall(m,q,s,r,c)")({
             m: method,
             q: method.resolvedRequestType.ctor,
             s: method.resolvedResponseType.ctor
@@ -72364,6 +73462,7 @@ var Enum      = __nccwpck_require__(3528),
  * @param {Object.<string,*>} [options] Declared options
  */
 function Type(name, options) {
+    name = name.replace(/\W/g, "");
     Namespace.call(this, name, options);
 
     /**
@@ -72539,7 +73638,7 @@ Type.generateConstructor = function generateConstructor(mtype) {
         else if (field.repeated) gen
             ("this%s=[]", util.safeProp(field.name));
     return gen
-    ("if(p)for(var ks=Object.keys(p),i=0;i<ks.length;++i)if(p[ks[i]]!=null)") // omit undefined or null
+    ("if(p)for(var ks=Object.keys(p),i=0;i<ks.length;++i)if(p[ks[i]]!=null&&ks[i]!==\"__proto__\")") // omit undefined or null
         ("this[ks[i]]=p[ks[i]]");
     /* eslint-enable no-unexpected-multiline */
 };
@@ -72607,6 +73706,9 @@ Type.fromJSON = function fromJSON(name, json) {
         type.group = true;
     if (json.comment)
         type.comment = json.comment;
+    if (json.edition)
+        type._edition = json.edition;
+    type._defaultEdition = "proto3";  // For backwards-compatibility.
     return type;
 };
 
@@ -72619,6 +73721,7 @@ Type.prototype.toJSON = function toJSON(toJSONOptions) {
     var inherited = Namespace.prototype.toJSON.call(this, toJSONOptions);
     var keepComments = toJSONOptions ? Boolean(toJSONOptions.keepComments) : false;
     return util.toObject([
+        "edition"    , this._editionToJSON(),
         "options"    , inherited && inherited.options || undefined,
         "oneofs"     , Namespace.arrayToJSON(this.oneofsArray, toJSONOptions),
         "fields"     , Namespace.arrayToJSON(this.fieldsArray.filter(function(obj) { return !obj.declaringField; }), toJSONOptions) || {},
@@ -72634,23 +73737,47 @@ Type.prototype.toJSON = function toJSON(toJSONOptions) {
  * @override
  */
 Type.prototype.resolveAll = function resolveAll() {
-    var fields = this.fieldsArray, i = 0;
-    while (i < fields.length)
-        fields[i++].resolve();
+    if (!this._needsRecursiveResolve) return this;
+
+    Namespace.prototype.resolveAll.call(this);
     var oneofs = this.oneofsArray; i = 0;
     while (i < oneofs.length)
         oneofs[i++].resolve();
-    return Namespace.prototype.resolveAll.call(this);
+    var fields = this.fieldsArray, i = 0;
+    while (i < fields.length)
+        fields[i++].resolve();
+    return this;
+};
+
+/**
+ * @override
+ */
+Type.prototype._resolveFeaturesRecursive = function _resolveFeaturesRecursive(edition) {
+    if (!this._needsRecursiveFeatureResolution) return this;
+
+    edition = this._edition || edition;
+
+    Namespace.prototype._resolveFeaturesRecursive.call(this, edition);
+    this.oneofsArray.forEach(oneof => {
+        oneof._resolveFeatures(edition);
+    });
+    this.fieldsArray.forEach(field => {
+        field._resolveFeatures(edition);
+    });
+    return this;
 };
 
 /**
  * @override
  */
 Type.prototype.get = function get(name) {
-    return this.fields[name]
-        || this.oneofs && this.oneofs[name]
-        || this.nested && this.nested[name]
-        || null;
+    if (Object.prototype.hasOwnProperty.call(this.fields, name))
+        return this.fields[name];
+    if (this.oneofs && Object.prototype.hasOwnProperty.call(this.oneofs, name))
+        return this.oneofs[name];
+    if (this.nested && Object.prototype.hasOwnProperty.call(this.nested, name))
+        return this.nested[name];
+    return null;
 };
 
 /**
@@ -72661,7 +73788,6 @@ Type.prototype.get = function get(name) {
  * @throws {Error} If there is already a nested object with this name or, if a field, when there is already a field with this id
  */
 Type.prototype.add = function add(object) {
-
     if (this.get(object.name))
         throw Error("duplicate name '" + object.name + "' in " + this);
 
@@ -72677,6 +73803,8 @@ Type.prototype.add = function add(object) {
             throw Error("id " + object.id + " is reserved in " + this);
         if (this.isReservedName(object.name))
             throw Error("name '" + object.name + "' is reserved in " + this);
+        if (object.name === "__proto__")
+            return this;
 
         if (object.parent)
             object.parent.remove(object);
@@ -72686,6 +73814,8 @@ Type.prototype.add = function add(object) {
         return clearCache(this);
     }
     if (object instanceof OneOf) {
+        if (object.name === "__proto__")
+            return this;
         if (!this.oneofs)
             this.oneofs = {};
         this.oneofs[object.name] = object;
@@ -72834,12 +73964,14 @@ Type.prototype.encodeDelimited = function encodeDelimited(message, writer) {
  * Decodes a message of this type.
  * @param {Reader|Uint8Array} reader Reader or buffer to decode from
  * @param {number} [length] Length of the message, if known beforehand
+ * @param {number} [end] Expected group end tag, if decoding a group
+ * @param {number} [depth] Current nesting depth
  * @returns {Message<{}>} Decoded message
  * @throws {Error} If the payload is not a reader or valid buffer
  * @throws {util.ProtocolError<{}>} If required fields are missing
  */
-Type.prototype.decode = function decode_setup(reader, length) {
-    return this.setup().decode(reader, length); // overrides this method
+Type.prototype.decode = function decode_setup(reader, length, end, depth) {
+    return this.setup().decode(reader, length, end, depth); // overrides this method
 };
 
 /**
@@ -72858,19 +73990,21 @@ Type.prototype.decodeDelimited = function decodeDelimited(reader) {
 /**
  * Verifies that field values are valid and that required fields are present.
  * @param {Object.<string,*>} message Plain object to verify
+ * @param {number} [depth] Current nesting depth
  * @returns {null|string} `null` if valid, otherwise the reason why it is not
  */
-Type.prototype.verify = function verify_setup(message) {
-    return this.setup().verify(message); // overrides this method
+Type.prototype.verify = function verify_setup(message, depth) {
+    return this.setup().verify(message, depth); // overrides this method
 };
 
 /**
  * Creates a new message of this type from a plain object. Also converts values to their respective internal types.
  * @param {Object.<string,*>} object Plain object to convert
+ * @param {number} [depth] Current nesting depth
  * @returns {Message<{}>} Message instance
  */
-Type.prototype.fromObject = function fromObject(object) {
-    return this.setup().fromObject(object);
+Type.prototype.fromObject = function fromObject(object, depth) {
+    return this.setup().fromObject(object, depth);
 };
 
 /**
@@ -72959,7 +74093,7 @@ var s = [
 ];
 
 function bake(values, offset) {
-    var i = 0, o = {};
+    var i = 0, o = Object.create(null);
     offset |= 0;
     while (i < values.length) o[s[i + offset]] = values[i++];
     return o;
@@ -73150,6 +74284,10 @@ var Type, // cyclic
 util.codegen = __nccwpck_require__(5346);
 util.fetch   = __nccwpck_require__(4279);
 util.path    = __nccwpck_require__(6090);
+util.patterns = __nccwpck_require__(1991);
+
+var reservedRe = util.patterns.reservedRe,
+    unsafePropertyRe = util.patterns.unsafePropertyRe;
 
 /**
  * Node's fs module if available.
@@ -73191,16 +74329,13 @@ util.toObject = function toObject(array) {
     return object;
 };
 
-var safePropBackslashRe = /\\/g,
-    safePropQuoteRe     = /"/g;
-
 /**
  * Tests whether the specified name is a reserved word in JS.
  * @param {string} name Name to test
  * @returns {boolean} `true` if reserved, otherwise `false`
  */
 util.isReserved = function isReserved(name) {
-    return /^(?:do|if|in|for|let|new|try|var|case|else|enum|eval|false|null|this|true|void|with|break|catch|class|const|super|throw|while|yield|delete|export|import|public|return|static|switch|typeof|default|extends|finally|package|private|continue|debugger|function|arguments|interface|protected|implements|instanceof)$/.test(name);
+    return reservedRe.test(name);
 };
 
 /**
@@ -73209,8 +74344,8 @@ util.isReserved = function isReserved(name) {
  * @returns {string} Safe accessor
  */
 util.safeProp = function safeProp(prop) {
-    if (!/^[$\w_]+$/.test(prop) || util.isReserved(prop))
-        return "[\"" + prop.replace(safePropBackslashRe, "\\\\").replace(safePropQuoteRe, "\\\"") + "\"]";
+    if (!/^[$\w_]+$/.test(prop) || reservedRe.test(prop))
+        return "[" + JSON.stringify(prop) + "]";
     return "." + prop;
 };
 
@@ -73307,18 +74442,20 @@ util.decorateEnum = function decorateEnum(object) {
  * @param {Object.<string,*>} dst Destination object
  * @param {string} path dot '.' delimited path of the property to set
  * @param {Object} value the value to set
+ * @param {boolean|undefined} [ifNotSet] Sets the option only if it isn't currently set
  * @returns {Object.<string,*>} Destination object
  */
-util.setProperty = function setProperty(dst, path, value) {
+util.setProperty = function setProperty(dst, path, value, ifNotSet) {
     function setProp(dst, path, value) {
         var part = path.shift();
-        if (part === "__proto__" || part === "prototype") {
-          return dst;
-        }
+        if (unsafePropertyRe.test(part))
+            return dst;
         if (path.length > 0) {
             dst[part] = setProp(dst[part] || {}, path, value);
         } else {
             var prevValue = dst[part];
+            if (prevValue && ifNotSet)
+                return dst;
             if (prevValue)
                 value = [].concat(prevValue).concat(value);
             dst[part] = value;
@@ -73801,11 +74938,34 @@ util.longFromHash = function longFromHash(hash, unsigned) {
 function merge(dst, src, ifNotSet) { // used by converters
     for (var keys = Object.keys(src), i = 0; i < keys.length; ++i)
         if (dst[keys[i]] === undefined || !ifNotSet)
-            dst[keys[i]] = src[keys[i]];
+            if (keys[i] !== "__proto__")
+                dst[keys[i]] = src[keys[i]];
     return dst;
 }
 
 util.merge = merge;
+
+/**
+ * Recursion limit.
+ * @memberof util
+ * @type {number}
+ */
+util.recursionLimit = 100;
+
+/**
+ * Makes a property safe for assignment as an own property.
+ * @memberof util
+ * @param {Object.<string,*>} obj Object
+ * @param {string} key Property key
+ * @returns {undefined}
+ */
+util.makeProp = function makeProp(obj, key) {
+    Object.defineProperty(obj, key, {
+        enumerable: true,
+        configurable: true,
+        writable: true
+    });
+};
 
 /**
  * Converts the first character of a string to lower case.
@@ -74004,6 +75164,22 @@ util._configure = function() {
 
 /***/ }),
 
+/***/ 1991:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+
+var patterns = exports;
+
+patterns.numberRe    = /^(?![eE])[0-9]*(?:\.[0-9]*)?(?:[eE][+-]?[0-9]+)?$/;
+patterns.typeRefRe   = /^(?:\.?[a-zA-Z_][a-zA-Z_0-9]*)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)*$/;
+patterns.reservedRe  = /^(?:do|if|in|for|let|new|try|var|case|else|enum|eval|false|null|this|true|void|with|break|catch|class|const|super|throw|while|yield|delete|export|import|public|return|static|switch|typeof|default|extends|finally|package|private|continue|debugger|function|arguments|interface|protected|implements|instanceof)$/;
+patterns.unsafePropertyRe = /^(?:__proto__|prototype|constructor)$/;
+
+
+/***/ }),
+
 /***/ 7639:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -74042,7 +75218,7 @@ function genVerifyValue(gen, field, fieldIndex, ref) {
         } else {
             gen
             ("{")
-                ("var e=types[%i].verify(%s);", fieldIndex, ref)
+                ("var e=types[%i].verify(%s,n+1);", fieldIndex, ref)
                 ("if(e)")
                     ("return%j+e", field.name + ".")
             ("}");
@@ -74132,9 +75308,12 @@ function genVerifyKey(gen, field, ref) {
 function verifier(mtype) {
     /* eslint-disable no-unexpected-multiline */
 
-    var gen = util.codegen(["m"], mtype.name + "$verify")
+    var gen = util.codegen(["m", "n"], mtype.name + "$verify")
     ("if(typeof m!==\"object\"||m===null)")
-        ("return%j", "object expected");
+        ("return%j", "object expected")
+    ("if(n===undefined)n=0")
+    ("if(n>util.recursionLimit)")
+        ("return%j", "maximum nesting depth exceeded");
     var oneofs = mtype.oneofsArray,
         seenFirstField = {};
     if (oneofs.length) gen
@@ -74186,6 +75365,7 @@ function verifier(mtype) {
     /* eslint-enable no-unexpected-multiline */
 }
 
+
 /***/ }),
 
 /***/ 9781:
@@ -74232,7 +75412,7 @@ var Message = __nccwpck_require__(9450);
 // Custom wrapper for Any
 wrappers[".google.protobuf.Any"] = {
 
-    fromObject: function(object) {
+    fromObject: function(object, depth) {
 
         // unwrap value type if mapped
         if (object && object["@type"]) {
@@ -74248,14 +75428,15 @@ wrappers[".google.protobuf.Any"] = {
                 if (type_url.indexOf("/") === -1) {
                     type_url = "/" + type_url;
                 }
+                var nextDepth = depth === undefined ? 1 : depth + 1;
                 return this.create({
                     type_url: type_url,
-                    value: type.encode(type.fromObject(object)).finish()
+                    value: type.encode(type.fromObject(object, nextDepth)).finish()
                 });
             }
         }
 
-        return this.fromObject(object);
+        return this.fromObject(object, depth);
     },
 
     toObject: function(message, options) {
@@ -74953,24 +76134,6 @@ var pump = function () {
 }
 
 module.exports = pump
-
-
-/***/ }),
-
-/***/ 5506:
-/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
-
-module.exports = (typeof process !== 'undefined' && typeof process.nextTick === 'function')
-  ? process.nextTick.bind(process)
-  : __nccwpck_require__(6828)
-
-
-/***/ }),
-
-/***/ 6828:
-/***/ ((module) => {
-
-module.exports = typeof queueMicrotask === 'function' ? queueMicrotask : (fn) => Promise.resolve().then(fn)
 
 
 /***/ }),
@@ -81339,9 +82502,14 @@ class Client extends EventEmitter {
     return this;
   }
 
-  sftp(cb) {
+  sftp(env, cb) {
     if (!this._sock || !isWritable(this._sock))
       throw new Error('Not connected');
+
+    if (typeof env === 'function') {
+      cb = env;
+      env = undefined;
+    }
 
     openChannel(this, 'sftp', (err, sftp) => {
       if (err) {
@@ -81349,7 +82517,7 @@ class Client extends EventEmitter {
         return;
       }
 
-      reqSubsystem(sftp, 'sftp', (err, sftp_) => {
+      const reqSubsystemCb = (err, sftp_) => {
         if (err) {
           cb(err);
           return;
@@ -81395,7 +82563,20 @@ class Client extends EventEmitter {
             .on('close', onExit);
 
         sftp._init();
-      });
+      };
+
+      if (typeof env === 'object' && env !== null) {
+        reqEnv(sftp, env, (err) => {
+          if (err) {
+            cb(err);
+            return;
+          }
+
+          reqSubsystem(sftp, 'sftp', reqSubsystemCb);
+        });
+      } else {
+        reqSubsystem(sftp, 'sftp', reqSubsystemCb);
+      }
     });
 
     return this;
@@ -81629,16 +82810,33 @@ function reqExec(chan, cmd, opts, cb) {
   chan._client._protocol.exec(chan.outgoing.id, cmd, true);
 }
 
-function reqEnv(chan, env) {
-  if (chan.outgoing.state !== 'open')
+function reqEnv(chan, env, cb) {
+  const wantReply = (typeof cb === 'function');
+
+  if (chan.outgoing.state !== 'open') {
+    if (wantReply)
+      cb(new Error('Channel is not open'));
     return;
+  }
+
+  if (wantReply) {
+    chan._callbacks.push((had_err) => {
+      if (had_err) {
+        cb(had_err !== true
+           ? had_err
+           : new Error('Unable to set environment'));
+        return;
+      }
+      cb();
+    });
+  }
 
   const keys = Object.keys(env || {});
 
   for (let i = 0; i < keys.length; ++i) {
     const key = keys[i];
     const val = env[key];
-    chan._client._protocol.env(chan.outgoing.id, key, val, false);
+    chan._client._protocol.env(chan.outgoing.id, key, val, wantReply);
   }
 }
 
@@ -98099,17 +99297,20 @@ module.exports = {
 /***/ 6204:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const { EventEmitter } = __nccwpck_require__(4434)
+const { EventEmitter } = __nccwpck_require__(9580)
 const STREAM_DESTROYED = new Error('Stream was destroyed')
 const PREMATURE_CLOSE = new Error('Premature close')
 
-const queueTick = __nccwpck_require__(5506)
 const FIFO = __nccwpck_require__(3867)
+const TextDecoder = __nccwpck_require__(7934)
+
+// if we do a future major, expect queue microtask to be there always, for now a bit defensive
+const qmt = typeof queueMicrotask === 'undefined' ? fn => global.process.nextTick(fn) : queueMicrotask
 
 /* eslint-disable no-multi-spaces */
 
-// 27 bits used total (4 from shared, 13 from read, and 10 from write)
-const MAX = ((1 << 27) - 1)
+// 29 bits used total (4 from shared, 14 from read, and 11 from write)
+const MAX = ((1 << 29) - 1)
 
 // Shared state
 const OPENING       = 0b0001
@@ -98121,25 +99322,27 @@ const NOT_OPENING = MAX ^ OPENING
 const NOT_PREDESTROYING = MAX ^ PREDESTROYING
 
 // Read state (4 bit offset from shared state)
-const READ_ACTIVE           = 0b0000000000001 << 4
-const READ_UPDATING         = 0b0000000000010 << 4
-const READ_PRIMARY          = 0b0000000000100 << 4
-const READ_QUEUED           = 0b0000000001000 << 4
-const READ_RESUMED          = 0b0000000010000 << 4
-const READ_PIPE_DRAINED     = 0b0000000100000 << 4
-const READ_ENDING           = 0b0000001000000 << 4
-const READ_EMIT_DATA        = 0b0000010000000 << 4
-const READ_EMIT_READABLE    = 0b0000100000000 << 4
-const READ_EMITTED_READABLE = 0b0001000000000 << 4
-const READ_DONE             = 0b0010000000000 << 4
-const READ_NEXT_TICK        = 0b0100000000000 << 4
-const READ_NEEDS_PUSH       = 0b1000000000000 << 4
+const READ_ACTIVE           = 0b00000000000001 << 4
+const READ_UPDATING         = 0b00000000000010 << 4
+const READ_PRIMARY          = 0b00000000000100 << 4
+const READ_QUEUED           = 0b00000000001000 << 4
+const READ_RESUMED          = 0b00000000010000 << 4
+const READ_PIPE_DRAINED     = 0b00000000100000 << 4
+const READ_ENDING           = 0b00000001000000 << 4
+const READ_EMIT_DATA        = 0b00000010000000 << 4
+const READ_EMIT_READABLE    = 0b00000100000000 << 4
+const READ_EMITTED_READABLE = 0b00001000000000 << 4
+const READ_DONE             = 0b00010000000000 << 4
+const READ_NEXT_TICK        = 0b00100000000000 << 4
+const READ_NEEDS_PUSH       = 0b01000000000000 << 4
+const READ_READ_AHEAD       = 0b10000000000000 << 4
 
 // Combined read state
 const READ_FLOWING = READ_RESUMED | READ_PIPE_DRAINED
 const READ_ACTIVE_AND_NEEDS_PUSH = READ_ACTIVE | READ_NEEDS_PUSH
 const READ_PRIMARY_AND_ACTIVE = READ_PRIMARY | READ_ACTIVE
 const READ_EMIT_READABLE_AND_QUEUED = READ_EMIT_READABLE | READ_QUEUED
+const READ_RESUMED_READ_AHEAD = READ_RESUMED | READ_READ_AHEAD
 
 const READ_NOT_ACTIVE             = MAX ^ READ_ACTIVE
 const READ_NON_PRIMARY            = MAX ^ READ_PRIMARY
@@ -98151,26 +99354,30 @@ const READ_NOT_ENDING             = MAX ^ READ_ENDING
 const READ_PIPE_NOT_DRAINED       = MAX ^ READ_FLOWING
 const READ_NOT_NEXT_TICK          = MAX ^ READ_NEXT_TICK
 const READ_NOT_UPDATING           = MAX ^ READ_UPDATING
+const READ_NO_READ_AHEAD          = MAX ^ READ_READ_AHEAD
+const READ_PAUSED_NO_READ_AHEAD   = MAX ^ READ_RESUMED_READ_AHEAD
 
-// Write state (17 bit offset, 4 bit offset from shared state and 13 from read state)
-const WRITE_ACTIVE     = 0b0000000001 << 17
-const WRITE_UPDATING   = 0b0000000010 << 17
-const WRITE_PRIMARY    = 0b0000000100 << 17
-const WRITE_QUEUED     = 0b0000001000 << 17
-const WRITE_UNDRAINED  = 0b0000010000 << 17
-const WRITE_DONE       = 0b0000100000 << 17
-const WRITE_EMIT_DRAIN = 0b0001000000 << 17
-const WRITE_NEXT_TICK  = 0b0010000000 << 17
-const WRITE_WRITING    = 0b0100000000 << 17
-const WRITE_FINISHING  = 0b1000000000 << 17
+// Write state (18 bit offset, 4 bit offset from shared state and 14 from read state)
+const WRITE_ACTIVE     = 0b00000000001 << 18
+const WRITE_UPDATING   = 0b00000000010 << 18
+const WRITE_PRIMARY    = 0b00000000100 << 18
+const WRITE_QUEUED     = 0b00000001000 << 18
+const WRITE_UNDRAINED  = 0b00000010000 << 18
+const WRITE_DONE       = 0b00000100000 << 18
+const WRITE_EMIT_DRAIN = 0b00001000000 << 18
+const WRITE_NEXT_TICK  = 0b00010000000 << 18
+const WRITE_WRITING    = 0b00100000000 << 18
+const WRITE_FINISHING  = 0b01000000000 << 18
+const WRITE_CORKED     = 0b10000000000 << 18
 
 const WRITE_NOT_ACTIVE    = MAX ^ (WRITE_ACTIVE | WRITE_WRITING)
 const WRITE_NON_PRIMARY   = MAX ^ WRITE_PRIMARY
-const WRITE_NOT_FINISHING = MAX ^ WRITE_FINISHING
+const WRITE_NOT_FINISHING = MAX ^ (WRITE_ACTIVE | WRITE_FINISHING)
 const WRITE_DRAINED       = MAX ^ WRITE_UNDRAINED
 const WRITE_NOT_QUEUED    = MAX ^ WRITE_QUEUED
 const WRITE_NOT_NEXT_TICK = MAX ^ WRITE_NEXT_TICK
 const WRITE_NOT_UPDATING  = MAX ^ WRITE_UPDATING
+const WRITE_NOT_CORKED    = MAX ^ WRITE_CORKED
 
 // Combined shared state
 const ACTIVE = READ_ACTIVE | WRITE_ACTIVE
@@ -98189,21 +99396,23 @@ const READ_PRIMARY_STATUS = OPEN_STATUS | READ_ENDING | READ_DONE
 const READ_STATUS = OPEN_STATUS | READ_DONE | READ_QUEUED
 const READ_ENDING_STATUS = OPEN_STATUS | READ_ENDING | READ_QUEUED
 const READ_READABLE_STATUS = OPEN_STATUS | READ_EMIT_READABLE | READ_QUEUED | READ_EMITTED_READABLE
-const SHOULD_NOT_READ = OPEN_STATUS | READ_ACTIVE | READ_ENDING | READ_DONE | READ_NEEDS_PUSH
+const SHOULD_NOT_READ = OPEN_STATUS | READ_ACTIVE | READ_ENDING | READ_DONE | READ_NEEDS_PUSH | READ_READ_AHEAD
 const READ_BACKPRESSURE_STATUS = DESTROY_STATUS | READ_ENDING | READ_DONE
 const READ_UPDATE_SYNC_STATUS = READ_UPDATING | OPEN_STATUS | READ_NEXT_TICK | READ_PRIMARY
+const READ_NEXT_TICK_OR_OPENING = READ_NEXT_TICK | OPENING
 
 // Combined write state
 const WRITE_PRIMARY_STATUS = OPEN_STATUS | WRITE_FINISHING | WRITE_DONE
 const WRITE_QUEUED_AND_UNDRAINED = WRITE_QUEUED | WRITE_UNDRAINED
 const WRITE_QUEUED_AND_ACTIVE = WRITE_QUEUED | WRITE_ACTIVE
 const WRITE_DRAIN_STATUS = WRITE_QUEUED | WRITE_UNDRAINED | OPEN_STATUS | WRITE_ACTIVE
-const WRITE_STATUS = OPEN_STATUS | WRITE_ACTIVE | WRITE_QUEUED
+const WRITE_STATUS = OPEN_STATUS | WRITE_ACTIVE | WRITE_QUEUED | WRITE_CORKED
 const WRITE_PRIMARY_AND_ACTIVE = WRITE_PRIMARY | WRITE_ACTIVE
 const WRITE_ACTIVE_AND_WRITING = WRITE_ACTIVE | WRITE_WRITING
 const WRITE_FINISHING_STATUS = OPEN_STATUS | WRITE_FINISHING | WRITE_QUEUED_AND_ACTIVE | WRITE_DONE
 const WRITE_BACKPRESSURE_STATUS = WRITE_UNDRAINED | DESTROY_STATUS | WRITE_FINISHING | WRITE_DONE
 const WRITE_UPDATE_SYNC_STATUS = WRITE_UPDATING | OPEN_STATUS | WRITE_NEXT_TICK | WRITE_PRIMARY
+const WRITE_DROP_DATA = WRITE_FINISHING | WRITE_DONE | DESTROY_STATUS
 
 const asyncIterator = Symbol.asyncIterator || Symbol('asyncIterator')
 
@@ -98227,6 +99436,7 @@ class WritableState {
   }
 
   push (data) {
+    if ((this.stream._duplexState & WRITE_DROP_DATA) !== 0) return false
     if (this.map !== null) data = this.map(data)
 
     this.buffered += this.byteLength(data)
@@ -98291,7 +99501,7 @@ class WritableState {
     const stream = this.stream
 
     if ((stream._duplexState & WRITE_FINISHING_STATUS) === WRITE_FINISHING) {
-      stream._duplexState = (stream._duplexState | WRITE_ACTIVE) & WRITE_NOT_FINISHING
+      stream._duplexState = stream._duplexState | WRITE_ACTIVE
       stream._final(afterFinal.bind(this))
       return
     }
@@ -98324,7 +99534,7 @@ class WritableState {
   updateNextTick () {
     if ((this.stream._duplexState & WRITE_NEXT_TICK) !== 0) return
     this.stream._duplexState |= WRITE_NEXT_TICK
-    if ((this.stream._duplexState & WRITE_UPDATING) === 0) queueTick(this.afterUpdateNextTick)
+    if ((this.stream._duplexState & WRITE_UPDATING) === 0) qmt(this.afterUpdateNextTick)
   }
 }
 
@@ -98332,8 +99542,9 @@ class ReadableState {
   constructor (stream, { highWaterMark = 16384, map = null, mapReadable, byteLength, byteLengthReadable } = {}) {
     this.stream = stream
     this.queue = new FIFO()
-    this.highWaterMark = highWaterMark
+    this.highWaterMark = highWaterMark === 0 ? 1 : highWaterMark
     this.buffered = 0
+    this.readAhead = highWaterMark > 0
     this.error = null
     this.pipeline = null
     this.byteLength = byteLengthReadable || byteLength || defaultByteLength
@@ -98383,7 +99594,14 @@ class ReadableState {
       return false
     }
 
-    if (this.map !== null) data = this.map(data)
+    if (this.map !== null) {
+      data = this.map(data)
+      if (data === null) {
+        stream._duplexState &= READ_PUSHED
+        return this.buffered < this.highWaterMark
+      }
+    }
+
     this.buffered += this.byteLength(data)
     this.queue.push(data)
 
@@ -98423,6 +99641,11 @@ class ReadableState {
       return data
     }
 
+    if (this.readAhead === false) {
+      stream._duplexState |= READ_READ_AHEAD
+      this.updateNextTick()
+    }
+
     return null
   }
 
@@ -98444,7 +99667,7 @@ class ReadableState {
     do {
       this.drain()
 
-      while (this.buffered < this.highWaterMark && (stream._duplexState & SHOULD_NOT_READ) === 0) {
+      while (this.buffered < this.highWaterMark && (stream._duplexState & SHOULD_NOT_READ) === READ_READ_AHEAD) {
         stream._duplexState |= READ_ACTIVE_AND_NEEDS_PUSH
         stream._read(this.afterRead)
         this.drain()
@@ -98492,14 +99715,20 @@ class ReadableState {
   }
 
   updateCallback () {
-    if ((this.stream._readableState & READ_UPDATE_SYNC_STATUS) === READ_PRIMARY) this.update()
+    if ((this.stream._duplexState & READ_UPDATE_SYNC_STATUS) === READ_PRIMARY) this.update()
     else this.updateNextTick()
+  }
+
+  updateNextTickIfOpen () {
+    if ((this.stream._duplexState & READ_NEXT_TICK_OR_OPENING) !== 0) return
+    this.stream._duplexState |= READ_NEXT_TICK
+    if ((this.stream._duplexState & READ_UPDATING) === 0) qmt(this.afterUpdateNextTick)
   }
 
   updateNextTick () {
     if ((this.stream._duplexState & READ_NEXT_TICK) !== 0) return
     this.stream._duplexState |= READ_NEXT_TICK
-    if ((this.stream._duplexState & READ_UPDATING) === 0) queueTick(this.afterUpdateNextTick)
+    if ((this.stream._duplexState & READ_UPDATING) === 0) qmt(this.afterUpdateNextTick)
   }
 }
 
@@ -98570,7 +99799,7 @@ function afterFinal (err) {
     stream._duplexState |= DESTROYING
   }
 
-  stream._duplexState &= WRITE_NOT_ACTIVE
+  stream._duplexState &= WRITE_NOT_FINISHING
 
   // no need to wait the extra tick here, so we short circuit that
   if ((stream._duplexState & WRITE_UPDATING) === 0) this.update()
@@ -98617,6 +99846,7 @@ function afterWrite (err) {
 function afterRead (err) {
   if (err) this.stream.destroy(err)
   this.stream._duplexState &= READ_NOT_ACTIVE
+  if (this.readAhead === false && (this.stream._duplexState & READ_RESUMED) === 0) this.stream._duplexState &= READ_NO_READ_AHEAD
   this.updateCallback()
 }
 
@@ -98671,6 +99901,26 @@ function afterTransform (err, data) {
   this._writableState.afterWrite(err)
 }
 
+function newListener (name) {
+  if (this._readableState !== null) {
+    if (name === 'data') {
+      this._duplexState |= (READ_EMIT_DATA | READ_RESUMED_READ_AHEAD)
+      this._readableState.updateNextTick()
+    }
+    if (name === 'readable') {
+      this._duplexState |= READ_EMIT_READABLE
+      this._readableState.updateNextTick()
+    }
+  }
+
+  if (this._writableState !== null) {
+    if (name === 'drain') {
+      this._duplexState |= WRITE_EMIT_DRAIN
+      this._writableState.updateNextTick()
+    }
+  }
+}
+
 class Stream extends EventEmitter {
   constructor (opts) {
     super()
@@ -98687,6 +99937,8 @@ class Stream extends EventEmitter {
         opts.signal.addEventListener('abort', abort.bind(this))
       }
     }
+
+    this.on('newListener', newListener)
   }
 
   _open (cb) {
@@ -98739,40 +99991,32 @@ class Stream extends EventEmitter {
       if (this._writableState !== null) this._writableState.updateNextTick()
     }
   }
-
-  on (name, fn) {
-    if (this._readableState !== null) {
-      if (name === 'data') {
-        this._duplexState |= (READ_EMIT_DATA | READ_RESUMED)
-        this._readableState.updateNextTick()
-      }
-      if (name === 'readable') {
-        this._duplexState |= READ_EMIT_READABLE
-        this._readableState.updateNextTick()
-      }
-    }
-
-    if (this._writableState !== null) {
-      if (name === 'drain') {
-        this._duplexState |= WRITE_EMIT_DRAIN
-        this._writableState.updateNextTick()
-      }
-    }
-
-    return super.on(name, fn)
-  }
 }
 
 class Readable extends Stream {
   constructor (opts) {
     super(opts)
 
-    this._duplexState |= OPENING | WRITE_DONE
+    this._duplexState |= OPENING | WRITE_DONE | READ_READ_AHEAD
     this._readableState = new ReadableState(this, opts)
 
     if (opts) {
+      if (this._readableState.readAhead === false) this._duplexState &= READ_NO_READ_AHEAD
       if (opts.read) this._read = opts.read
       if (opts.eagerOpen) this._readableState.updateNextTick()
+      if (opts.encoding) this.setEncoding(opts.encoding)
+    }
+  }
+
+  setEncoding (encoding) {
+    const dec = new TextDecoder(encoding)
+    const map = this._readableState.map || echo
+    this._readableState.map = mapOrSkip
+    return this
+
+    function mapOrSkip (data) {
+      const next = dec.push(data)
+      return next === '' && (data.byteLength !== 0 || dec.remaining > 0) ? null : map(next)
     }
   }
 
@@ -98792,23 +100036,23 @@ class Readable extends Stream {
   }
 
   push (data) {
-    this._readableState.updateNextTick()
+    this._readableState.updateNextTickIfOpen()
     return this._readableState.push(data)
   }
 
   unshift (data) {
-    this._readableState.updateNextTick()
+    this._readableState.updateNextTickIfOpen()
     return this._readableState.unshift(data)
   }
 
   resume () {
-    this._duplexState |= READ_RESUMED
+    this._duplexState |= READ_RESUMED_READ_AHEAD
     this._readableState.updateNextTick()
     return this
   }
 
   pause () {
-    this._duplexState &= READ_PAUSED
+    this._duplexState &= (this._readableState.readAhead === false ? READ_PAUSED_NO_READ_AHEAD : READ_PAUSED)
     return this
   }
 
@@ -98936,6 +100180,15 @@ class Writable extends Stream {
     }
   }
 
+  cork () {
+    this._duplexState |= WRITE_CORKED
+  }
+
+  uncork () {
+    this._duplexState &= WRITE_NOT_CORKED
+    this._writableState.updateNextTick()
+  }
+
   _writev (batch, cb) {
     cb(null)
   }
@@ -98955,7 +100208,8 @@ class Writable extends Stream {
   static drained (ws) {
     if (ws.destroyed) return Promise.resolve(false)
     const state = ws._writableState
-    const writes = state.queue.length + ((ws._duplexState & WRITE_WRITING) ? 1 : 0)
+    const pending = (isWritev(ws) ? Math.min(1, state.queue.length) : state.queue.length)
+    const writes = pending + ((ws._duplexState & WRITE_WRITING) ? 1 : 0)
     if (writes === 0) return Promise.resolve(true)
     if (state.drains === null) state.drains = []
     return new Promise((resolve) => {
@@ -98979,7 +100233,7 @@ class Duplex extends Readable { // and Writable
   constructor (opts) {
     super(opts)
 
-    this._duplexState = OPENING
+    this._duplexState = OPENING | (this._duplexState & READ_READ_AHEAD)
     this._writableState = new WritableState(this, opts)
 
     if (opts) {
@@ -98987,6 +100241,15 @@ class Duplex extends Readable { // and Writable
       if (opts.write) this._write = opts.write
       if (opts.final) this._final = opts.final
     }
+  }
+
+  cork () {
+    this._duplexState |= WRITE_CORKED
+  }
+
+  uncork () {
+    this._duplexState &= WRITE_NOT_CORKED
+    this._writableState.updateNextTick()
   }
 
   _writev (batch, cb) {
@@ -99040,6 +100303,14 @@ class Transform extends Duplex {
       this._transform(data, this._transformState.afterTransform)
     } else {
       cb(null)
+    }
+  }
+
+  destroy (err) {
+    super.destroy(err)
+    if (this._transformState.data !== null) {
+      this._transformState.data = null
+      this._transformState.afterTransform()
     }
   }
 
@@ -99140,6 +100411,10 @@ function pipeline (stream, ...streams) {
   }
 }
 
+function echo (s) {
+  return s
+}
+
 function isStream (stream) {
   return !!stream._readableState || !!stream._writableState
 }
@@ -99148,13 +100423,27 @@ function isStreamx (stream) {
   return typeof stream._duplexState === 'number' && isStream(stream)
 }
 
-function getStreamError (stream) {
+function isEnded (stream) {
+  return !!stream._readableState && stream._readableState.ended
+}
+
+function isFinished (stream) {
+  return !!stream._writableState && stream._writableState.ended
+}
+
+function getStreamError (stream, opts = {}) {
   const err = (stream._readableState && stream._readableState.error) || (stream._writableState && stream._writableState.error)
-  return err === STREAM_DESTROYED ? null : err // only explicit errors
+
+  // avoid implicit errors by default
+  return (!opts.all && err === STREAM_DESTROYED) ? null : err
 }
 
 function isReadStreamx (stream) {
   return isStreamx(stream) && stream.readable
+}
+
+function isDisturbed (stream) {
+  return (stream._duplexState & OPENING) !== OPENING || (stream._duplexState & ACTIVE_OR_TICKING) !== 0
 }
 
 function isTypedArray (data) {
@@ -99171,11 +100460,18 @@ function abort () {
   this.destroy(new Error('Stream aborted.'))
 }
 
+function isWritev (s) {
+  return s._writev !== Writable.prototype._writev && s._writev !== Duplex.prototype._writev
+}
+
 module.exports = {
   pipeline,
   pipelinePromise,
   isStream,
   isStreamx,
+  isEnded,
+  isFinished,
+  isDisturbed,
   getStreamError,
   Stream,
   Writable,
@@ -101974,6 +103270,295 @@ function overflow (self, size) {
 
 function mapWritable (buf) {
   return b4a.isBuffer(buf) ? buf : b4a.from(buf)
+}
+
+
+/***/ }),
+
+/***/ 7934:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const PassThroughDecoder = __nccwpck_require__(7256)
+const UTF8Decoder = __nccwpck_require__(6414)
+
+module.exports = class TextDecoder {
+  constructor(encoding = 'utf8') {
+    this.encoding = normalizeEncoding(encoding)
+
+    switch (this.encoding) {
+      case 'utf8':
+        this.decoder = new UTF8Decoder()
+        break
+      case 'utf16le':
+      case 'base64':
+        throw new Error('Unsupported encoding: ' + this.encoding)
+      default:
+        this.decoder = new PassThroughDecoder(this.encoding)
+    }
+  }
+
+  get remaining() {
+    return this.decoder.remaining
+  }
+
+  push(data) {
+    if (typeof data === 'string') return data
+    return this.decoder.decode(data)
+  }
+
+  // For Node.js compatibility
+  write(data) {
+    return this.push(data)
+  }
+
+  end(data) {
+    let result = ''
+    if (data) result = this.push(data)
+    result += this.decoder.flush()
+    return result
+  }
+}
+
+function normalizeEncoding(encoding) {
+  encoding = encoding.toLowerCase()
+
+  switch (encoding) {
+    case 'utf8':
+    case 'utf-8':
+      return 'utf8'
+    case 'ucs2':
+    case 'ucs-2':
+    case 'utf16le':
+    case 'utf-16le':
+      return 'utf16le'
+    case 'latin1':
+    case 'binary':
+      return 'latin1'
+    case 'base64':
+    case 'ascii':
+    case 'hex':
+      return encoding
+    default:
+      throw new Error('Unknown encoding: ' + encoding)
+  }
+}
+
+
+/***/ }),
+
+/***/ 7256:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const b4a = __nccwpck_require__(3057)
+
+module.exports = class PassThroughDecoder {
+  constructor(encoding) {
+    this.encoding = encoding
+  }
+
+  get remaining() {
+    return 0
+  }
+
+  decode(data) {
+    return b4a.toString(data, this.encoding)
+  }
+
+  flush() {
+    return ''
+  }
+}
+
+
+/***/ }),
+
+/***/ 6414:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+const b4a = __nccwpck_require__(3057)
+
+/**
+ * https://encoding.spec.whatwg.org/#utf-8-decoder
+ */
+module.exports = class UTF8Decoder {
+  constructor() {
+    this._reset()
+  }
+
+  get remaining() {
+    return this.bytesSeen
+  }
+
+  decode(data) {
+    if (data.byteLength === 0) return ''
+
+    if (this.bytesNeeded === 0 && trailingIncomplete(data, 0) === 0) {
+      this.bytesSeen = trailingBytesSeen(data)
+      return b4a.toString(data, 'utf8')
+    }
+
+    let result = ''
+    let start = 0
+
+    if (this.bytesNeeded > 0) {
+      while (start < data.byteLength) {
+        const byte = data[start]
+
+        if (byte < this.lowerBoundary || byte > this.upperBoundary) {
+          result += '\ufffd'
+          this._reset()
+          break
+        }
+
+        this.lowerBoundary = 0x80
+        this.upperBoundary = 0xbf
+        this.codePoint = (this.codePoint << 6) | (byte & 0x3f)
+        this.bytesSeen++
+        start++
+
+        if (this.bytesSeen === this.bytesNeeded) {
+          result += String.fromCodePoint(this.codePoint)
+          this._reset()
+          break
+        }
+      }
+
+      if (this.bytesNeeded > 0) return result
+    }
+
+    const trailing = trailingIncomplete(data, start)
+    const end = data.byteLength - trailing
+
+    if (end > start) result += b4a.toString(data, 'utf8', start, end)
+
+    for (let i = end; i < data.byteLength; i++) {
+      const byte = data[i]
+
+      if (this.bytesNeeded === 0) {
+        if (byte <= 0x7f) {
+          this.bytesSeen = 0
+          result += String.fromCharCode(byte)
+        } else if (byte >= 0xc2 && byte <= 0xdf) {
+          this.bytesNeeded = 2
+          this.bytesSeen = 1
+          this.codePoint = byte & 0x1f
+        } else if (byte >= 0xe0 && byte <= 0xef) {
+          if (byte === 0xe0) this.lowerBoundary = 0xa0
+          else if (byte === 0xed) this.upperBoundary = 0x9f
+          this.bytesNeeded = 3
+          this.bytesSeen = 1
+          this.codePoint = byte & 0xf
+        } else if (byte >= 0xf0 && byte <= 0xf4) {
+          if (byte === 0xf0) this.lowerBoundary = 0x90
+          else if (byte === 0xf4) this.upperBoundary = 0x8f
+          this.bytesNeeded = 4
+          this.bytesSeen = 1
+          this.codePoint = byte & 0x7
+        } else {
+          this.bytesSeen = 1
+          result += '\ufffd'
+        }
+
+        continue
+      }
+
+      if (byte < this.lowerBoundary || byte > this.upperBoundary) {
+        result += '\ufffd'
+        i--
+        this._reset()
+
+        continue
+      }
+
+      this.lowerBoundary = 0x80
+      this.upperBoundary = 0xbf
+
+      this.codePoint = (this.codePoint << 6) | (byte & 0x3f)
+      this.bytesSeen++
+
+      if (this.bytesSeen === this.bytesNeeded) {
+        result += String.fromCodePoint(this.codePoint)
+        this._reset()
+      }
+    }
+
+    return result
+  }
+
+  flush() {
+    const result = this.bytesNeeded > 0 ? '\ufffd' : ''
+    this._reset()
+    return result
+  }
+
+  _reset() {
+    this.codePoint = 0
+    this.bytesNeeded = 0
+    this.bytesSeen = 0
+    this.lowerBoundary = 0x80
+    this.upperBoundary = 0xbf
+  }
+}
+
+function trailingIncomplete(data, start) {
+  const len = data.byteLength
+  if (len <= start) return 0
+
+  const limit = Math.max(start, len - 4)
+
+  let i = len - 1
+  while (i > limit && (data[i] & 0xc0) === 0x80) i--
+
+  if (i < start) return 0
+
+  const byte = data[i]
+
+  let needed
+  if (byte <= 0x7f) return 0
+  if (byte >= 0xc2 && byte <= 0xdf) needed = 2
+  else if (byte >= 0xe0 && byte <= 0xef) needed = 3
+  else if (byte >= 0xf0 && byte <= 0xf4) needed = 4
+  else return 0
+
+  const available = len - i
+  return available < needed ? available : 0
+}
+
+function trailingBytesSeen(data) {
+  const len = data.byteLength
+  if (len === 0) return 0
+
+  const last = data[len - 1]
+
+  if (last <= 0x7f) return 0
+  if ((last & 0xc0) !== 0x80) return 1
+
+  const limit = Math.max(0, len - 4)
+
+  let i = len - 2
+  while (i >= limit && (data[i] & 0xc0) === 0x80) i--
+
+  if (i < 0) return 1
+
+  const first = data[i]
+
+  let needed
+  if (first >= 0xc2 && first <= 0xdf) needed = 2
+  else if (first >= 0xe0 && first <= 0xef) needed = 3
+  else if (first >= 0xf0 && first <= 0xf4) needed = 4
+  else return 1
+
+  if (len - i !== needed) return 1
+
+  if (needed >= 3) {
+    const second = data[i + 1]
+    if (first === 0xe0 && second < 0xa0) return 1
+    if (first === 0xed && second > 0x9f) return 1
+    if (first === 0xf0 && second < 0x90) return 1
+    if (first === 0xf4 && second > 0x8f) return 1
+  }
+
+  return 0
 }
 
 
@@ -128291,6 +129876,7 @@ exports.getOrgFromImage = getOrgFromImage;
 const core = __importStar(__nccwpck_require__(7484));
 const dockerode_1 = __importDefault(__nccwpck_require__(9040));
 const stream_1 = __nccwpck_require__(2203);
+const utils_1 = __nccwpck_require__(1798);
 const MAX_RETRIES = 5; // Maximum number of retries
 const INITIAL_DELAY_MS = 5000; // Initial delay in milliseconds for backoff
 const sleep = async (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -128310,13 +129896,12 @@ function getOrgFromImage(imageName) {
 exports.ImageService = {
     async pull(imageName, sendMetric, force = false) {
         /*
-          This method fetches images hosts on GitHub infrastructure.
+          This method fetches images hosted on GitHub or Azure infrastructure.
     
           We expose the `fetch_image` utility method to allow us to pull in arbitrary images for unit tests.
         */
-        if (!(imageName.startsWith('ghcr.io/') ||
-            imageName.startsWith('docker.pkg.github.com/'))) {
-            throw new Error('Only images distributed via docker.pkg.github.com or ghcr.io can be fetched');
+        if (!(0, utils_1.validImageRepository)(imageName)) {
+            throw new Error('Only images distributed via docker.pkg.github.com, ghcr.io or azure-api.net can be fetched');
         }
         const docker = new dockerode_1.default();
         const org = getOrgFromImage(imageName);
@@ -128540,9 +130125,9 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const httpClient = __importStar(__nccwpck_require__(4844));
 const api_client_1 = __nccwpck_require__(7475);
-const inputs_1 = __nccwpck_require__(8422);
-const image_service_1 = __nccwpck_require__(6540);
 const docker_tags_1 = __nccwpck_require__(6669);
+const image_service_1 = __nccwpck_require__(6540);
+const inputs_1 = __nccwpck_require__(8422);
 const updater_1 = __nccwpck_require__(322);
 var DependabotErrorType;
 (function (DependabotErrorType) {
@@ -128550,6 +130135,9 @@ var DependabotErrorType;
     DependabotErrorType["Image"] = "actions_workflow_image";
     DependabotErrorType["UpdateRun"] = "actions_workflow_updater";
 })(DependabotErrorType || (exports.DependabotErrorType = DependabotErrorType = {}));
+const FALLBACK_CONTAINER_REGISTRY = 'dependabot-acr-apim-production.azure-api.net';
+const FEATURE_DISABLE_GHCR_PULL = 'disable-ghcr-pull';
+const FEATURE_PULL_FROM_AZURE = 'azure-registry-backup';
 let jobId;
 async function run(context) {
     try {
@@ -128590,7 +130178,8 @@ async function run(context) {
         // webhook as it anticipates scenarios where jobs have failed while 'enqueued'.
         const details = await apiClient.getJobDetails();
         // The dynamic workflow can specify which updater image to use. If it doesn't, fall back to the pinned version.
-        const updaterImage = params.updaterImage || (0, docker_tags_1.updaterImageName)(details['package-manager']);
+        let updaterImage = params.updaterImage || (0, docker_tags_1.updaterImageName)(details['package-manager']);
+        let proxyImage = docker_tags_1.PROXY_IMAGE_NAME;
         // The sendMetrics function is used to send metrics to the API client.
         // It uses the package manager as a tag to identify the metric.
         const sendMetricsWithPackageManager = async (name, metricType, value, additionalTags = {}) => {
@@ -128613,23 +130202,47 @@ async function run(context) {
                 core.info('Adding GitHub Packages credential');
                 credentials.push(packagesCred);
             }
-            const updater = new updater_1.Updater(updaterImage, docker_tags_1.PROXY_IMAGE_NAME, apiClient, details, credentials);
             core.startGroup('Pulling updater images');
-            try {
-                // Using sendMetricsWithPackageManager wrapper to inject package manager tag ti
-                // avoid passing additional parameters to ImageService.pull method
-                await image_service_1.ImageService.pull(updaterImage, sendMetricsWithPackageManager);
-                await image_service_1.ImageService.pull(docker_tags_1.PROXY_IMAGE_NAME, sendMetricsWithPackageManager);
-            }
-            catch (error) {
-                if (error instanceof Error) {
-                    await failJob(apiClient, 'Error fetching updater images', error, DependabotErrorType.Image);
-                    return;
+            let imagesPulled = false;
+            let pullError = new Error('No image source was configured');
+            const experiments = details?.experiments || {};
+            if (experiments[FEATURE_DISABLE_GHCR_PULL] !== true) {
+                try {
+                    // Using sendMetricsWithPackageManager wrapper to inject package manager tag to
+                    // avoid passing additional parameters to ImageService.pull method
+                    await image_service_1.ImageService.pull(updaterImage, sendMetricsWithPackageManager);
+                    await image_service_1.ImageService.pull(proxyImage, sendMetricsWithPackageManager);
+                    imagesPulled = true;
                 }
+                catch (error) {
+                    if (error instanceof Error) {
+                        pullError = error;
+                    }
+                }
+            }
+            if (!imagesPulled && experiments[FEATURE_PULL_FROM_AZURE]) {
+                core.warning('Primary image pull failed, attempting fallback');
+                updaterImage = `${FALLBACK_CONTAINER_REGISTRY}/${updaterImage}`;
+                proxyImage = `${FALLBACK_CONTAINER_REGISTRY}/${proxyImage}`;
+                try {
+                    await image_service_1.ImageService.pull(updaterImage, sendMetricsWithPackageManager);
+                    await image_service_1.ImageService.pull(proxyImage, sendMetricsWithPackageManager);
+                    imagesPulled = true;
+                }
+                catch (error) {
+                    if (error instanceof Error) {
+                        pullError = error;
+                    }
+                }
+            }
+            if (!imagesPulled) {
+                await failJob(apiClient, 'Error fetching updater images', pullError, DependabotErrorType.Image);
+                return;
             }
             core.endGroup();
             try {
                 core.info('Starting update process');
+                const updater = new updater_1.Updater(updaterImage, proxyImage, apiClient, details, credentials);
                 await updater.runUpdater();
             }
             catch (error) {
@@ -128682,11 +130295,15 @@ function getPackagesCredential(jobDetails, actor) {
             credential = getRubyGemsPackagesCredential(jobDetails, actor, githubToken);
             break;
         case 'docker':
+        case 'docker_compose':
+        case 'devcontainers':
             credential = getDockerPackagesCredential(jobDetails, actor, githubToken);
             break;
         case 'maven':
+        case 'gradle':
             credential = getMavenPackagesCredential(jobDetails, actor, githubToken);
             break;
+        case 'bun':
         case 'npm_and_yarn':
             credential = getNpmPackagesCredential(jobDetails, actor, githubToken);
             break;
@@ -129050,7 +130667,14 @@ class ProxyBuilder {
                 `PROXY_CACHE=${this.cachedMode ? 'true' : 'false'}`,
                 `DEPENDABOT_API_URL=${dependabotApiUrl}`,
                 `ACTIONS_ID_TOKEN_REQUEST_TOKEN=${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || ''}`,
-                `ACTIONS_ID_TOKEN_REQUEST_URL=${process.env.ACTIONS_ID_TOKEN_REQUEST_URL || ''}`
+                `ACTIONS_ID_TOKEN_REQUEST_URL=${process.env.ACTIONS_ID_TOKEN_REQUEST_URL || ''}`,
+                // Pass through OPENSSL_FORCE_FIPS_MODE from the host if set.
+                // The container does not have the OpenSSL FIPS provider installed, so OpenSSL fails while running update-ca-certificates on FIPS-enabled self-hosted runners.
+                // Setting OPENSSL_FORCE_FIPS_MODE=0 on the host works around this by explicitly preventing OpenSSL from using FIPS.
+                // We only propagate the env variable when it is explicitly set so as not to alter default behavior.
+                ...(process.env.OPENSSL_FORCE_FIPS_MODE !== undefined
+                    ? [`OPENSSL_FORCE_FIPS_MODE=${process.env.OPENSSL_FORCE_FIPS_MODE}`]
+                    : [])
             ],
             Entrypoint: [
                 'sh',
@@ -129160,11 +130784,26 @@ class UpdaterBuilder {
             `https_proxy=${proxyUrl}`,
             `HTTPS_PROXY=${proxyUrl}`,
             `UPDATER_ONE_CONTAINER=1`,
-            `ENABLE_CONNECTIVITY_CHECK=${process.env.DEPENDABOT_ENABLE_CONNECTIVITY_CHECK || '1'}`
+            `ENABLE_CONNECTIVITY_CHECK=${process.env.DEPENDABOT_ENABLE_CONNECTIVITY_CHECK || '1'}`,
+            // Increase V8 heap size from the default ~2GB to 4GB.
+            // The container memory limit (UPDATER_MAX_MEMORY) is 8GB, but Node.js
+            // auto-scaling caps V8 heap at ~2GB for containers above 4GB.
+            // This is insufficient for large pnpm/npm monorepos (100+ workspace
+            // packages) where lockfile regeneration requires more heap.
+            // 4GB is half the container limit, leaving room for Ruby and other processes.
+            // See: https://github.com/dependabot/dependabot-core/issues/14596
+            `NODE_OPTIONS=--max-old-space-size=4096`
         ];
         // Add DEPENDABOT_UPDATER_SHA if we successfully extracted a SHA
         if (updaterSha !== null) {
             envVars.push(`DEPENDABOT_UPDATER_SHA=${updaterSha}`);
+        }
+        // Pass through OPENSSL_FORCE_FIPS_MODE from the host if set.
+        // The container does not have the OpenSSL FIPS provider installed, so OpenSSL fails while running update-ca-certificates on FIPS-enabled self-hosted runners.
+        // Setting OPENSSL_FORCE_FIPS_MODE=0 on the host works around this by explicitly preventing OpenSSL from using FIPS.
+        // We only propagate the env variable when it is explicitly set so as not to alter default behavior.
+        if (process.env.OPENSSL_FORCE_FIPS_MODE !== undefined) {
+            envVars.push(`OPENSSL_FORCE_FIPS_MODE=${process.env.OPENSSL_FORCE_FIPS_MODE}`);
         }
         const container = await this.docker.createContainer({
             Image: this.updaterImage,
@@ -129350,8 +130989,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.extractUpdaterSha = exports.errStream = exports.outStream = exports.base64DecodeDependencyFile = void 0;
+exports.validImageRepository = exports.extractUpdaterSha = exports.errStream = exports.outStream = exports.base64DecodeDependencyFile = void 0;
 const stream_1 = __importDefault(__nccwpck_require__(2203));
+const AZURE_REGISTRY_RE = /^[\w-.]*\.azure-api\.net\//;
 const base64Decode = (str) => Buffer.from(str, 'base64').toString('binary');
 const base64DecodeDependencyFile = (file) => {
     const fileCopy = JSON.parse(JSON.stringify(file));
@@ -129387,6 +131027,16 @@ const extractUpdaterSha = (updaterImage) => {
     return match ? match[1] : null;
 };
 exports.extractUpdaterSha = extractUpdaterSha;
+/**
+ * @param imageName - Image string including repository
+ * @returns True if the given imageName is from a permissible repository
+ */
+const validImageRepository = (imageName) => {
+    return (imageName.startsWith('ghcr.io/') ||
+        imageName.startsWith('docker.pkg.github.com/') ||
+        AZURE_REGISTRY_RE.test(imageName));
+};
+exports.validImageRepository = validImageRepository;
 
 
 /***/ }),
@@ -131312,7 +132962,7 @@ module.exports = require("zlib");
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"proxy":"ghcr.io/dependabot/proxy:v2.0.20260129233510@sha256:aee1af4a514c0c5e573f3b33a51f9f2b9c58234cb011ea4d44b9e05aec92436c","bundler":"ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20260108161155@sha256:0425f9036b290b9742537cf0cbe5d2b3ae627a79d57aae0446a42557513fb6cf","cargo":"ghcr.io/dependabot/dependabot-updater-cargo:v2.0.20260108161155@sha256:7fe512892a17fe6fbdc5d0f2cf6f7b53ae465fdd3e76b0034cbc11d31af33405","composer":"ghcr.io/dependabot/dependabot-updater-composer:v2.0.20260108161155@sha256:02240711f5e6cc2fbe0ca7eef4fcc1fd5741c2296259033696b3a0d4b1a91b4e","pub":"ghcr.io/dependabot/dependabot-updater-pub:v2.0.20260108161155@sha256:8fc3ae2fbcf1b14057b97181f159b975968bad009503e6c2a2216733122a5056","docker":"ghcr.io/dependabot/dependabot-updater-docker:v2.0.20260108161155@sha256:7e4e00123368e3eea5138bea358371bd7281823024740095123f0c9f3f870f8b","elm":"ghcr.io/dependabot/dependabot-updater-elm:v2.0.20260108161155@sha256:c5f652328c8e5a1da25206b4e3fc7041e909a100d877ff811c2e214913461c2d","github_actions":"ghcr.io/dependabot/dependabot-updater-github-actions:v2.0.20260108161155@sha256:a208d4b257f9e96dc34321704ec0abaedf1d560ef15688498110f3ebf7b6469f","submodules":"ghcr.io/dependabot/dependabot-updater-gitsubmodule:v2.0.20260108161155@sha256:039b45e18cd40b5062d5d68345084fbbe41be9a76ddcd5154aae3d93a363237e","go_modules":"ghcr.io/dependabot/dependabot-updater-gomod:v2.0.20260108161155@sha256:cbd0b12106080038e6dd5adbb06471492f09cb95b807712fc401a75a531e839f","gradle":"ghcr.io/dependabot/dependabot-updater-gradle:v2.0.20260108161155@sha256:fe534358ff03ef377c237d923f9ade6b0d3f5a1d2e8083e55b4049ceb813779d","maven":"ghcr.io/dependabot/dependabot-updater-maven:v2.0.20260108161155@sha256:c9d92d068f2bbf4d85fae3caaa295112ebceefb6ea0f9d570d599521cc452288","hex":"ghcr.io/dependabot/dependabot-updater-mix:v2.0.20260108161155@sha256:71a0e73877d745830fb8df4a9bf493e77efb300dc5f94c75f343a006c812e01d","nuget":"ghcr.io/dependabot/dependabot-updater-nuget:v2.0.20260108161155@sha256:a19d0b19ec8c56bf23b9026a8f09aa103bfa9192a3fc35999ce73b5cb30aa8ee","npm_and_yarn":"ghcr.io/dependabot/dependabot-updater-npm:v2.0.20260108161155@sha256:dcc47dc8b3b4b7a951fd55dd15a1d887b11f8e8639b78e25b7be24cf86e81665","pip":"ghcr.io/dependabot/dependabot-updater-pip:v2.0.20260108161155@sha256:b4f2e066c311478daee2f55008aa07ae65545beb876e55e5be4a5e7caee67de1","rust_toolchain":"ghcr.io/dependabot/dependabot-updater-rust-toolchain:v2.0.20260108161155@sha256:fa7a2582fd6357ace4a50206ba8ca636903c6042085ef9a147540648b9e6871c","swift":"ghcr.io/dependabot/dependabot-updater-swift:v2.0.20260108161155@sha256:d55f037397637ad46ea999fa3c0cd575be9fd689a19569ca3220c5eea478f83b","terraform":"ghcr.io/dependabot/dependabot-updater-terraform:v2.0.20260108161155@sha256:ec7931c1f873af4e61b863aafb145a6ff66fa99784a047027dfdfef3732215dd","devcontainers":"ghcr.io/dependabot/dependabot-updater-devcontainers:v2.0.20260108161155@sha256:1914834ae6d4d98a5bf5051c144693b84452e8b3cc8d875fd759b89546939e77","dotnet_sdk":"ghcr.io/dependabot/dependabot-updater-dotnet-sdk:v2.0.20260108161155@sha256:4a333362158f9a9a511d63ba8f0c2afd06e132cc6203751c5a4ead68b3d12649","bun":"ghcr.io/dependabot/dependabot-updater-bun:v2.0.20260108161155@sha256:cae0833d12043ac818b82f054407daf2aa7e6e1788953fd49e6d41e3f1cb0193","docker_compose":"ghcr.io/dependabot/dependabot-updater-docker-compose:v2.0.20260108161155@sha256:09030a7ae4240edaaaf2a5e1f7d86ab3963f242243f23928e4c065ee17afdb7a","uv":"ghcr.io/dependabot/dependabot-updater-uv:v2.0.20260108161155@sha256:2446c3f82517ef2b9d3fc69ead9493a1e047e77d87d00f5a4aa93f3b28b9d76b","vcpkg":"ghcr.io/dependabot/dependabot-updater-vcpkg:v2.0.20260108161155@sha256:8e48a96d174ab63ba7b794307b9f16a231f5dd343544902e9b1999b7eb46efbb","helm":"ghcr.io/dependabot/dependabot-updater-helm:v2.0.20260108161155@sha256:899bd54f9ec5b8a7dfcd989d294f534bd7e320a9eb19758d119d90edeffbd8e9","julia":"ghcr.io/dependabot/dependabot-updater-julia:v2.0.20260108161155@sha256:ac0861bc1660c63378df1cb6555c4d140845c5524294bb93f1cf7789873f00a3","bazel":"ghcr.io/dependabot/dependabot-updater-bazel:v2.0.20260108161155@sha256:6640de1134b582a01df260d6a645a6d75edbf6ff80ab294aa88a7081337914cc","opentofu":"ghcr.io/dependabot/dependabot-updater-opentofu:v2.0.20260108161155@sha256:ec360a9e100945c887ab53dd00112d46d6ba2a05494d06fdcbb2293681cb4eae"}');
+module.exports = /*#__PURE__*/JSON.parse('{"proxy":"ghcr.io/dependabot/proxy:v2.0.20260427232629@sha256:4b22239a1bf296fb9a95264b395e965d41044bdb14ffd2caa95dc612fa9db64a","bundler":"ghcr.io/dependabot/dependabot-updater-bundler:v2.0.20260507203823@sha256:2e682b4e0a6ffa25a62ea673275c9489645d8ac3f0be21a3eff25a02f1950e32","cargo":"ghcr.io/dependabot/dependabot-updater-cargo:v2.0.20260507203823@sha256:59494524be81bb527292258b2267d33f3ae19127e61db4c74bbd69e4fafbe678","composer":"ghcr.io/dependabot/dependabot-updater-composer:v2.0.20260507203823@sha256:2bb8ab04e7bd7903d6de9ed858d8094dd98585027f9c6428ae96068a4a813174","pub":"ghcr.io/dependabot/dependabot-updater-pub:v2.0.20260507203823@sha256:53f398e79be72a63da367d08899cf6d16c0db728eed36b896a2f68f9a698f71f","docker":"ghcr.io/dependabot/dependabot-updater-docker:v2.0.20260507203823@sha256:90f139a1901071588db004af4964bbb5eb06c2502f45c60d7089b35b4af67ccf","elm":"ghcr.io/dependabot/dependabot-updater-elm:v2.0.20260507203823@sha256:66ba4efc62f84d9d5667e247933d245848823b30acc0d132977007e64124938f","github_actions":"ghcr.io/dependabot/dependabot-updater-github-actions:v2.0.20260507203823@sha256:4b82a5b7aa8594b7c4bf9191cec6d5a67bd42b76962c9ee55a9ffc9a6e9dbedb","submodules":"ghcr.io/dependabot/dependabot-updater-gitsubmodule:v2.0.20260507203823@sha256:671acfe56166d968d7a24177f1c09b8995b0e89d9affe9c72bd9a5b74842334e","go_modules":"ghcr.io/dependabot/dependabot-updater-gomod:v2.0.20260507203823@sha256:13996b105ef424451137d93344e96943cdc790e82cf19e25f70076697166f7af","gradle":"ghcr.io/dependabot/dependabot-updater-gradle:v2.0.20260507203823@sha256:c9993842fef4ad6e2070330e81b059a05c612de31fc467fd398e548058bbbfed","maven":"ghcr.io/dependabot/dependabot-updater-maven:v2.0.20260507203823@sha256:6374b9f0e5077763ab6d3987cc8b5d0ca155b547e11c2c4d4b1c6438bca806ba","hex":"ghcr.io/dependabot/dependabot-updater-mix:v2.0.20260507203823@sha256:6ad51e838a79d7434227669635382c08f60c019de47f0b0d85b014d5a1226aa9","nuget":"ghcr.io/dependabot/dependabot-updater-nuget:v2.0.20260507203823@sha256:f45a6ba8f13439a624dbd6471e4b219b2a982709ca568fea410adbc017997fa0","npm_and_yarn":"ghcr.io/dependabot/dependabot-updater-npm:v2.0.20260507203823@sha256:189a5f2abd17033987e5e4a846c15a33ea41af52821a6a4c8a95d487c5afbdfc","pip":"ghcr.io/dependabot/dependabot-updater-pip:v2.0.20260507203823@sha256:79bed71930932f7fe6e416be88c61f1b1c0d750dc75b2a3714dfe84d32020c77","rust_toolchain":"ghcr.io/dependabot/dependabot-updater-rust-toolchain:v2.0.20260507203823@sha256:7ec3324073f379b391159c8b9e6ffbbe00266a4e93b13954149276fb8cf3c87d","swift":"ghcr.io/dependabot/dependabot-updater-swift:v2.0.20260507203823@sha256:892e78f29c12445003ce72f2568a2b890feb3cb5e01a65e681ca773c32cd4039","terraform":"ghcr.io/dependabot/dependabot-updater-terraform:v2.0.20260507203823@sha256:d1fe56721d0a455ecb53c4ae6a8f0c7c714c89e48177413ca0f8397c749c3740","devcontainers":"ghcr.io/dependabot/dependabot-updater-devcontainers:v2.0.20260507203823@sha256:e91cc2210e55b0d22819f5e5460cc59afe0d5249738e0a9eaea6ee6bf4322270","dotnet_sdk":"ghcr.io/dependabot/dependabot-updater-dotnet-sdk:v2.0.20260507203823@sha256:f6d9ccbfafb669cee0fb26727e48caa2d6281a49fb1bbdefd03a7e0de452b33f","bun":"ghcr.io/dependabot/dependabot-updater-bun:v2.0.20260507203823@sha256:0780bebdc5306bf3567c57d7b2dbb0004aec33c567668a686655902bcdeaee9c","docker_compose":"ghcr.io/dependabot/dependabot-updater-docker-compose:v2.0.20260507203823@sha256:ffe7d7f873a6be020f43c8c64f29737e831d81f537f5d425592c8f600b73da53","uv":"ghcr.io/dependabot/dependabot-updater-uv:v2.0.20260507203823@sha256:2cba06e58e373b7c725c4cb4912b0a5944bbd03e8b40a639144aad2daa0cbb57","vcpkg":"ghcr.io/dependabot/dependabot-updater-vcpkg:v2.0.20260507203823@sha256:adbc65acaea4df2b4a96150a0ae274d58b2782908c0015b6b9230abba4920fe9","helm":"ghcr.io/dependabot/dependabot-updater-helm:v2.0.20260507203823@sha256:0d86952f087589e15f00153edf53f8533bd6d0cdecd7607e9004a278eb45ac97","julia":"ghcr.io/dependabot/dependabot-updater-julia:v2.0.20260507203823@sha256:642efebf88312dbebfeea0b9b6e4045b3478e876e187002dc65241d178442204","bazel":"ghcr.io/dependabot/dependabot-updater-bazel:v2.0.20260507203823@sha256:8a1cb879dfdaa2c6101ac37800ec5669768f6df5f6e515a60bf8a62c4e25bcfc","opentofu":"ghcr.io/dependabot/dependabot-updater-opentofu:v2.0.20260507203823@sha256:1770baa50b983f2f888f95d3ddb36b565d910257557d42793380a3f09907aa7c","pre_commit":"ghcr.io/dependabot/dependabot-updater-pre-commit:v2.0.20260507203823@sha256:2d7bdf37bf38a8cc10bf121d75c0445e9a7135b829f7ddef2a0c0a08057e105e","conda":"ghcr.io/dependabot/dependabot-updater-conda:v2.0.20260507203823@sha256:9e614fb111e102f7dc905998e59fbf1acdba12728b8220001b1a210b04669a47","deno":"ghcr.io/dependabot/dependabot-updater-deno:v2.0.20260507203823@sha256:e8c3a57c120aabd6cc188c5f2c1c8d37fa3f9165ea64a5b32eec66d9c6492f8e","nix":"ghcr.io/dependabot/dependabot-updater-nix:v2.0.20260507203823@sha256:a725c0a20f4b7db3f7bbf3a5e8079a8234ba6122ab4b74e43487c57b3e135a34"}');
 
 /***/ }),
 
@@ -131336,7 +132986,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"nested":{"google":{"nested":{"protob
 /***/ ((module) => {
 
 "use strict";
-module.exports = /*#__PURE__*/JSON.parse('{"nested":{"google":{"nested":{"protobuf":{"nested":{"FileDescriptorSet":{"fields":{"file":{"rule":"repeated","type":"FileDescriptorProto","id":1}}},"FileDescriptorProto":{"fields":{"name":{"type":"string","id":1},"package":{"type":"string","id":2},"dependency":{"rule":"repeated","type":"string","id":3},"publicDependency":{"rule":"repeated","type":"int32","id":10,"options":{"packed":false}},"weakDependency":{"rule":"repeated","type":"int32","id":11,"options":{"packed":false}},"messageType":{"rule":"repeated","type":"DescriptorProto","id":4},"enumType":{"rule":"repeated","type":"EnumDescriptorProto","id":5},"service":{"rule":"repeated","type":"ServiceDescriptorProto","id":6},"extension":{"rule":"repeated","type":"FieldDescriptorProto","id":7},"options":{"type":"FileOptions","id":8},"sourceCodeInfo":{"type":"SourceCodeInfo","id":9},"syntax":{"type":"string","id":12}}},"DescriptorProto":{"fields":{"name":{"type":"string","id":1},"field":{"rule":"repeated","type":"FieldDescriptorProto","id":2},"extension":{"rule":"repeated","type":"FieldDescriptorProto","id":6},"nestedType":{"rule":"repeated","type":"DescriptorProto","id":3},"enumType":{"rule":"repeated","type":"EnumDescriptorProto","id":4},"extensionRange":{"rule":"repeated","type":"ExtensionRange","id":5},"oneofDecl":{"rule":"repeated","type":"OneofDescriptorProto","id":8},"options":{"type":"MessageOptions","id":7},"reservedRange":{"rule":"repeated","type":"ReservedRange","id":9},"reservedName":{"rule":"repeated","type":"string","id":10}},"nested":{"ExtensionRange":{"fields":{"start":{"type":"int32","id":1},"end":{"type":"int32","id":2}}},"ReservedRange":{"fields":{"start":{"type":"int32","id":1},"end":{"type":"int32","id":2}}}}},"FieldDescriptorProto":{"fields":{"name":{"type":"string","id":1},"number":{"type":"int32","id":3},"label":{"type":"Label","id":4},"type":{"type":"Type","id":5},"typeName":{"type":"string","id":6},"extendee":{"type":"string","id":2},"defaultValue":{"type":"string","id":7},"oneofIndex":{"type":"int32","id":9},"jsonName":{"type":"string","id":10},"options":{"type":"FieldOptions","id":8}},"nested":{"Type":{"values":{"TYPE_DOUBLE":1,"TYPE_FLOAT":2,"TYPE_INT64":3,"TYPE_UINT64":4,"TYPE_INT32":5,"TYPE_FIXED64":6,"TYPE_FIXED32":7,"TYPE_BOOL":8,"TYPE_STRING":9,"TYPE_GROUP":10,"TYPE_MESSAGE":11,"TYPE_BYTES":12,"TYPE_UINT32":13,"TYPE_ENUM":14,"TYPE_SFIXED32":15,"TYPE_SFIXED64":16,"TYPE_SINT32":17,"TYPE_SINT64":18}},"Label":{"values":{"LABEL_OPTIONAL":1,"LABEL_REQUIRED":2,"LABEL_REPEATED":3}}}},"OneofDescriptorProto":{"fields":{"name":{"type":"string","id":1},"options":{"type":"OneofOptions","id":2}}},"EnumDescriptorProto":{"fields":{"name":{"type":"string","id":1},"value":{"rule":"repeated","type":"EnumValueDescriptorProto","id":2},"options":{"type":"EnumOptions","id":3}}},"EnumValueDescriptorProto":{"fields":{"name":{"type":"string","id":1},"number":{"type":"int32","id":2},"options":{"type":"EnumValueOptions","id":3}}},"ServiceDescriptorProto":{"fields":{"name":{"type":"string","id":1},"method":{"rule":"repeated","type":"MethodDescriptorProto","id":2},"options":{"type":"ServiceOptions","id":3}}},"MethodDescriptorProto":{"fields":{"name":{"type":"string","id":1},"inputType":{"type":"string","id":2},"outputType":{"type":"string","id":3},"options":{"type":"MethodOptions","id":4},"clientStreaming":{"type":"bool","id":5},"serverStreaming":{"type":"bool","id":6}}},"FileOptions":{"fields":{"javaPackage":{"type":"string","id":1},"javaOuterClassname":{"type":"string","id":8},"javaMultipleFiles":{"type":"bool","id":10},"javaGenerateEqualsAndHash":{"type":"bool","id":20,"options":{"deprecated":true}},"javaStringCheckUtf8":{"type":"bool","id":27},"optimizeFor":{"type":"OptimizeMode","id":9,"options":{"default":"SPEED"}},"goPackage":{"type":"string","id":11},"ccGenericServices":{"type":"bool","id":16},"javaGenericServices":{"type":"bool","id":17},"pyGenericServices":{"type":"bool","id":18},"deprecated":{"type":"bool","id":23},"ccEnableArenas":{"type":"bool","id":31},"objcClassPrefix":{"type":"string","id":36},"csharpNamespace":{"type":"string","id":37},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]],"reserved":[[38,38]],"nested":{"OptimizeMode":{"values":{"SPEED":1,"CODE_SIZE":2,"LITE_RUNTIME":3}}}},"MessageOptions":{"fields":{"messageSetWireFormat":{"type":"bool","id":1},"noStandardDescriptorAccessor":{"type":"bool","id":2},"deprecated":{"type":"bool","id":3},"mapEntry":{"type":"bool","id":7},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]],"reserved":[[8,8]]},"FieldOptions":{"fields":{"ctype":{"type":"CType","id":1,"options":{"default":"STRING"}},"packed":{"type":"bool","id":2},"jstype":{"type":"JSType","id":6,"options":{"default":"JS_NORMAL"}},"lazy":{"type":"bool","id":5},"deprecated":{"type":"bool","id":3},"weak":{"type":"bool","id":10},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]],"reserved":[[4,4]],"nested":{"CType":{"values":{"STRING":0,"CORD":1,"STRING_PIECE":2}},"JSType":{"values":{"JS_NORMAL":0,"JS_STRING":1,"JS_NUMBER":2}}}},"OneofOptions":{"fields":{"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]]},"EnumOptions":{"fields":{"allowAlias":{"type":"bool","id":2},"deprecated":{"type":"bool","id":3},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]]},"EnumValueOptions":{"fields":{"deprecated":{"type":"bool","id":1},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]]},"ServiceOptions":{"fields":{"deprecated":{"type":"bool","id":33},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]]},"MethodOptions":{"fields":{"deprecated":{"type":"bool","id":33},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]]},"UninterpretedOption":{"fields":{"name":{"rule":"repeated","type":"NamePart","id":2},"identifierValue":{"type":"string","id":3},"positiveIntValue":{"type":"uint64","id":4},"negativeIntValue":{"type":"int64","id":5},"doubleValue":{"type":"double","id":6},"stringValue":{"type":"bytes","id":7},"aggregateValue":{"type":"string","id":8}},"nested":{"NamePart":{"fields":{"namePart":{"rule":"required","type":"string","id":1},"isExtension":{"rule":"required","type":"bool","id":2}}}}},"SourceCodeInfo":{"fields":{"location":{"rule":"repeated","type":"Location","id":1}},"nested":{"Location":{"fields":{"path":{"rule":"repeated","type":"int32","id":1},"span":{"rule":"repeated","type":"int32","id":2},"leadingComments":{"type":"string","id":3},"trailingComments":{"type":"string","id":4},"leadingDetachedComments":{"rule":"repeated","type":"string","id":6}}}}},"GeneratedCodeInfo":{"fields":{"annotation":{"rule":"repeated","type":"Annotation","id":1}},"nested":{"Annotation":{"fields":{"path":{"rule":"repeated","type":"int32","id":1},"sourceFile":{"type":"string","id":2},"begin":{"type":"int32","id":3},"end":{"type":"int32","id":4}}}}}}}}}}}');
+module.exports = /*#__PURE__*/JSON.parse('{"nested":{"google":{"nested":{"protobuf":{"options":{"go_package":"google.golang.org/protobuf/types/descriptorpb","java_package":"com.google.protobuf","java_outer_classname":"DescriptorProtos","csharp_namespace":"Google.Protobuf.Reflection","objc_class_prefix":"GPB","cc_enable_arenas":true,"optimize_for":"SPEED"},"nested":{"FileDescriptorSet":{"edition":"proto2","fields":{"file":{"rule":"repeated","type":"FileDescriptorProto","id":1}},"extensions":[[536000000,536000000]]},"Edition":{"edition":"proto2","values":{"EDITION_UNKNOWN":0,"EDITION_LEGACY":900,"EDITION_PROTO2":998,"EDITION_PROTO3":999,"EDITION_2023":1000,"EDITION_2024":1001,"EDITION_1_TEST_ONLY":1,"EDITION_2_TEST_ONLY":2,"EDITION_99997_TEST_ONLY":99997,"EDITION_99998_TEST_ONLY":99998,"EDITION_99999_TEST_ONLY":99999,"EDITION_MAX":2147483647}},"FileDescriptorProto":{"edition":"proto2","fields":{"name":{"type":"string","id":1},"package":{"type":"string","id":2},"dependency":{"rule":"repeated","type":"string","id":3},"publicDependency":{"rule":"repeated","type":"int32","id":10},"weakDependency":{"rule":"repeated","type":"int32","id":11},"optionDependency":{"rule":"repeated","type":"string","id":15},"messageType":{"rule":"repeated","type":"DescriptorProto","id":4},"enumType":{"rule":"repeated","type":"EnumDescriptorProto","id":5},"service":{"rule":"repeated","type":"ServiceDescriptorProto","id":6},"extension":{"rule":"repeated","type":"FieldDescriptorProto","id":7},"options":{"type":"FileOptions","id":8},"sourceCodeInfo":{"type":"SourceCodeInfo","id":9},"syntax":{"type":"string","id":12},"edition":{"type":"Edition","id":14}}},"DescriptorProto":{"edition":"proto2","fields":{"name":{"type":"string","id":1},"field":{"rule":"repeated","type":"FieldDescriptorProto","id":2},"extension":{"rule":"repeated","type":"FieldDescriptorProto","id":6},"nestedType":{"rule":"repeated","type":"DescriptorProto","id":3},"enumType":{"rule":"repeated","type":"EnumDescriptorProto","id":4},"extensionRange":{"rule":"repeated","type":"ExtensionRange","id":5},"oneofDecl":{"rule":"repeated","type":"OneofDescriptorProto","id":8},"options":{"type":"MessageOptions","id":7},"reservedRange":{"rule":"repeated","type":"ReservedRange","id":9},"reservedName":{"rule":"repeated","type":"string","id":10},"visibility":{"type":"SymbolVisibility","id":11}},"nested":{"ExtensionRange":{"fields":{"start":{"type":"int32","id":1},"end":{"type":"int32","id":2},"options":{"type":"ExtensionRangeOptions","id":3}}},"ReservedRange":{"fields":{"start":{"type":"int32","id":1},"end":{"type":"int32","id":2}}}}},"ExtensionRangeOptions":{"edition":"proto2","fields":{"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999},"declaration":{"rule":"repeated","type":"Declaration","id":2,"options":{"retention":"RETENTION_SOURCE"}},"features":{"type":"FeatureSet","id":50},"verification":{"type":"VerificationState","id":3,"options":{"default":"UNVERIFIED","retention":"RETENTION_SOURCE"}}},"extensions":[[1000,536870911]],"nested":{"Declaration":{"fields":{"number":{"type":"int32","id":1},"fullName":{"type":"string","id":2},"type":{"type":"string","id":3},"reserved":{"type":"bool","id":5},"repeated":{"type":"bool","id":6}},"reserved":[[4,4]]},"VerificationState":{"values":{"DECLARATION":0,"UNVERIFIED":1}}}},"FieldDescriptorProto":{"edition":"proto2","fields":{"name":{"type":"string","id":1},"number":{"type":"int32","id":3},"label":{"type":"Label","id":4},"type":{"type":"Type","id":5},"typeName":{"type":"string","id":6},"extendee":{"type":"string","id":2},"defaultValue":{"type":"string","id":7},"oneofIndex":{"type":"int32","id":9},"jsonName":{"type":"string","id":10},"options":{"type":"FieldOptions","id":8},"proto3Optional":{"type":"bool","id":17}},"nested":{"Type":{"values":{"TYPE_DOUBLE":1,"TYPE_FLOAT":2,"TYPE_INT64":3,"TYPE_UINT64":4,"TYPE_INT32":5,"TYPE_FIXED64":6,"TYPE_FIXED32":7,"TYPE_BOOL":8,"TYPE_STRING":9,"TYPE_GROUP":10,"TYPE_MESSAGE":11,"TYPE_BYTES":12,"TYPE_UINT32":13,"TYPE_ENUM":14,"TYPE_SFIXED32":15,"TYPE_SFIXED64":16,"TYPE_SINT32":17,"TYPE_SINT64":18}},"Label":{"values":{"LABEL_OPTIONAL":1,"LABEL_REPEATED":3,"LABEL_REQUIRED":2}}}},"OneofDescriptorProto":{"edition":"proto2","fields":{"name":{"type":"string","id":1},"options":{"type":"OneofOptions","id":2}}},"EnumDescriptorProto":{"edition":"proto2","fields":{"name":{"type":"string","id":1},"value":{"rule":"repeated","type":"EnumValueDescriptorProto","id":2},"options":{"type":"EnumOptions","id":3},"reservedRange":{"rule":"repeated","type":"EnumReservedRange","id":4},"reservedName":{"rule":"repeated","type":"string","id":5},"visibility":{"type":"SymbolVisibility","id":6}},"nested":{"EnumReservedRange":{"fields":{"start":{"type":"int32","id":1},"end":{"type":"int32","id":2}}}}},"EnumValueDescriptorProto":{"edition":"proto2","fields":{"name":{"type":"string","id":1},"number":{"type":"int32","id":2},"options":{"type":"EnumValueOptions","id":3}}},"ServiceDescriptorProto":{"edition":"proto2","fields":{"name":{"type":"string","id":1},"method":{"rule":"repeated","type":"MethodDescriptorProto","id":2},"options":{"type":"ServiceOptions","id":3}}},"MethodDescriptorProto":{"edition":"proto2","fields":{"name":{"type":"string","id":1},"inputType":{"type":"string","id":2},"outputType":{"type":"string","id":3},"options":{"type":"MethodOptions","id":4},"clientStreaming":{"type":"bool","id":5},"serverStreaming":{"type":"bool","id":6}}},"FileOptions":{"edition":"proto2","fields":{"javaPackage":{"type":"string","id":1},"javaOuterClassname":{"type":"string","id":8},"javaMultipleFiles":{"type":"bool","id":10},"javaGenerateEqualsAndHash":{"type":"bool","id":20,"options":{"deprecated":true}},"javaStringCheckUtf8":{"type":"bool","id":27},"optimizeFor":{"type":"OptimizeMode","id":9,"options":{"default":"SPEED"}},"goPackage":{"type":"string","id":11},"ccGenericServices":{"type":"bool","id":16},"javaGenericServices":{"type":"bool","id":17},"pyGenericServices":{"type":"bool","id":18},"deprecated":{"type":"bool","id":23},"ccEnableArenas":{"type":"bool","id":31,"options":{"default":true}},"objcClassPrefix":{"type":"string","id":36},"csharpNamespace":{"type":"string","id":37},"swiftPrefix":{"type":"string","id":39},"phpClassPrefix":{"type":"string","id":40},"phpNamespace":{"type":"string","id":41},"phpMetadataNamespace":{"type":"string","id":44},"rubyPackage":{"type":"string","id":45},"features":{"type":"FeatureSet","id":50},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]],"reserved":[[42,42],[38,38],"php_generic_services"],"nested":{"OptimizeMode":{"values":{"SPEED":1,"CODE_SIZE":2,"LITE_RUNTIME":3}}}},"MessageOptions":{"edition":"proto2","fields":{"messageSetWireFormat":{"type":"bool","id":1},"noStandardDescriptorAccessor":{"type":"bool","id":2},"deprecated":{"type":"bool","id":3},"mapEntry":{"type":"bool","id":7},"deprecatedLegacyJsonFieldConflicts":{"type":"bool","id":11,"options":{"deprecated":true}},"features":{"type":"FeatureSet","id":12},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]],"reserved":[[4,4],[5,5],[6,6],[8,8],[9,9]]},"FieldOptions":{"edition":"proto2","fields":{"ctype":{"type":"CType","id":1,"options":{"default":"STRING"}},"packed":{"type":"bool","id":2},"jstype":{"type":"JSType","id":6,"options":{"default":"JS_NORMAL"}},"lazy":{"type":"bool","id":5},"unverifiedLazy":{"type":"bool","id":15},"deprecated":{"type":"bool","id":3},"weak":{"type":"bool","id":10,"options":{"deprecated":true}},"debugRedact":{"type":"bool","id":16},"retention":{"type":"OptionRetention","id":17},"targets":{"rule":"repeated","type":"OptionTargetType","id":19},"editionDefaults":{"rule":"repeated","type":"EditionDefault","id":20},"features":{"type":"FeatureSet","id":21},"featureSupport":{"type":"FeatureSupport","id":22},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]],"reserved":[[4,4],[18,18]],"nested":{"CType":{"values":{"STRING":0,"CORD":1,"STRING_PIECE":2}},"JSType":{"values":{"JS_NORMAL":0,"JS_STRING":1,"JS_NUMBER":2}},"OptionRetention":{"values":{"RETENTION_UNKNOWN":0,"RETENTION_RUNTIME":1,"RETENTION_SOURCE":2}},"OptionTargetType":{"values":{"TARGET_TYPE_UNKNOWN":0,"TARGET_TYPE_FILE":1,"TARGET_TYPE_EXTENSION_RANGE":2,"TARGET_TYPE_MESSAGE":3,"TARGET_TYPE_FIELD":4,"TARGET_TYPE_ONEOF":5,"TARGET_TYPE_ENUM":6,"TARGET_TYPE_ENUM_ENTRY":7,"TARGET_TYPE_SERVICE":8,"TARGET_TYPE_METHOD":9}},"EditionDefault":{"fields":{"edition":{"type":"Edition","id":3},"value":{"type":"string","id":2}}},"FeatureSupport":{"fields":{"editionIntroduced":{"type":"Edition","id":1},"editionDeprecated":{"type":"Edition","id":2},"deprecationWarning":{"type":"string","id":3},"editionRemoved":{"type":"Edition","id":4}}}}},"OneofOptions":{"edition":"proto2","fields":{"features":{"type":"FeatureSet","id":1},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]]},"EnumOptions":{"edition":"proto2","fields":{"allowAlias":{"type":"bool","id":2},"deprecated":{"type":"bool","id":3},"deprecatedLegacyJsonFieldConflicts":{"type":"bool","id":6,"options":{"deprecated":true}},"features":{"type":"FeatureSet","id":7},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]],"reserved":[[5,5]]},"EnumValueOptions":{"edition":"proto2","fields":{"deprecated":{"type":"bool","id":1},"features":{"type":"FeatureSet","id":2},"debugRedact":{"type":"bool","id":3},"featureSupport":{"type":"FieldOptions.FeatureSupport","id":4},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]]},"ServiceOptions":{"edition":"proto2","fields":{"features":{"type":"FeatureSet","id":34},"deprecated":{"type":"bool","id":33},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]]},"MethodOptions":{"edition":"proto2","fields":{"deprecated":{"type":"bool","id":33},"idempotencyLevel":{"type":"IdempotencyLevel","id":34,"options":{"default":"IDEMPOTENCY_UNKNOWN"}},"features":{"type":"FeatureSet","id":35},"uninterpretedOption":{"rule":"repeated","type":"UninterpretedOption","id":999}},"extensions":[[1000,536870911]],"nested":{"IdempotencyLevel":{"values":{"IDEMPOTENCY_UNKNOWN":0,"NO_SIDE_EFFECTS":1,"IDEMPOTENT":2}}}},"UninterpretedOption":{"edition":"proto2","fields":{"name":{"rule":"repeated","type":"NamePart","id":2},"identifierValue":{"type":"string","id":3},"positiveIntValue":{"type":"uint64","id":4},"negativeIntValue":{"type":"int64","id":5},"doubleValue":{"type":"double","id":6},"stringValue":{"type":"bytes","id":7},"aggregateValue":{"type":"string","id":8}},"nested":{"NamePart":{"fields":{"namePart":{"rule":"required","type":"string","id":1},"isExtension":{"rule":"required","type":"bool","id":2}}}}},"FeatureSet":{"edition":"proto2","fields":{"fieldPresence":{"type":"FieldPresence","id":1,"options":{"retention":"RETENTION_RUNTIME","targets":"TARGET_TYPE_FILE","feature_support.edition_introduced":"EDITION_2023","edition_defaults.edition":"EDITION_2023","edition_defaults.value":"EXPLICIT"}},"enumType":{"type":"EnumType","id":2,"options":{"retention":"RETENTION_RUNTIME","targets":"TARGET_TYPE_FILE","feature_support.edition_introduced":"EDITION_2023","edition_defaults.edition":"EDITION_PROTO3","edition_defaults.value":"OPEN"}},"repeatedFieldEncoding":{"type":"RepeatedFieldEncoding","id":3,"options":{"retention":"RETENTION_RUNTIME","targets":"TARGET_TYPE_FILE","feature_support.edition_introduced":"EDITION_2023","edition_defaults.edition":"EDITION_PROTO3","edition_defaults.value":"PACKED"}},"utf8Validation":{"type":"Utf8Validation","id":4,"options":{"retention":"RETENTION_RUNTIME","targets":"TARGET_TYPE_FILE","feature_support.edition_introduced":"EDITION_2023","edition_defaults.edition":"EDITION_PROTO3","edition_defaults.value":"VERIFY"}},"messageEncoding":{"type":"MessageEncoding","id":5,"options":{"retention":"RETENTION_RUNTIME","targets":"TARGET_TYPE_FILE","feature_support.edition_introduced":"EDITION_2023","edition_defaults.edition":"EDITION_LEGACY","edition_defaults.value":"LENGTH_PREFIXED"}},"jsonFormat":{"type":"JsonFormat","id":6,"options":{"retention":"RETENTION_RUNTIME","targets":"TARGET_TYPE_FILE","feature_support.edition_introduced":"EDITION_2023","edition_defaults.edition":"EDITION_PROTO3","edition_defaults.value":"ALLOW"}},"enforceNamingStyle":{"type":"EnforceNamingStyle","id":7,"options":{"retention":"RETENTION_SOURCE","targets":"TARGET_TYPE_METHOD","feature_support.edition_introduced":"EDITION_2024","edition_defaults.edition":"EDITION_2024","edition_defaults.value":"STYLE2024"}},"defaultSymbolVisibility":{"type":"VisibilityFeature.DefaultSymbolVisibility","id":8,"options":{"retention":"RETENTION_SOURCE","targets":"TARGET_TYPE_FILE","feature_support.edition_introduced":"EDITION_2024","edition_defaults.edition":"EDITION_2024","edition_defaults.value":"EXPORT_TOP_LEVEL"}}},"extensions":[[1000,9994],[9995,9999],[10000,10000]],"reserved":[[999,999]],"nested":{"FieldPresence":{"values":{"FIELD_PRESENCE_UNKNOWN":0,"EXPLICIT":1,"IMPLICIT":2,"LEGACY_REQUIRED":3}},"EnumType":{"values":{"ENUM_TYPE_UNKNOWN":0,"OPEN":1,"CLOSED":2}},"RepeatedFieldEncoding":{"values":{"REPEATED_FIELD_ENCODING_UNKNOWN":0,"PACKED":1,"EXPANDED":2}},"Utf8Validation":{"values":{"UTF8_VALIDATION_UNKNOWN":0,"VERIFY":2,"NONE":3}},"MessageEncoding":{"values":{"MESSAGE_ENCODING_UNKNOWN":0,"LENGTH_PREFIXED":1,"DELIMITED":2}},"JsonFormat":{"values":{"JSON_FORMAT_UNKNOWN":0,"ALLOW":1,"LEGACY_BEST_EFFORT":2}},"EnforceNamingStyle":{"values":{"ENFORCE_NAMING_STYLE_UNKNOWN":0,"STYLE2024":1,"STYLE_LEGACY":2}},"VisibilityFeature":{"fields":{},"reserved":[[1,536870911]],"nested":{"DefaultSymbolVisibility":{"values":{"DEFAULT_SYMBOL_VISIBILITY_UNKNOWN":0,"EXPORT_ALL":1,"EXPORT_TOP_LEVEL":2,"LOCAL_ALL":3,"STRICT":4}}}}}},"FeatureSetDefaults":{"edition":"proto2","fields":{"defaults":{"rule":"repeated","type":"FeatureSetEditionDefault","id":1},"minimumEdition":{"type":"Edition","id":4},"maximumEdition":{"type":"Edition","id":5}},"nested":{"FeatureSetEditionDefault":{"fields":{"edition":{"type":"Edition","id":3},"overridableFeatures":{"type":"FeatureSet","id":4},"fixedFeatures":{"type":"FeatureSet","id":5}},"reserved":[[1,1],[2,2],"features"]}}},"SourceCodeInfo":{"edition":"proto2","fields":{"location":{"rule":"repeated","type":"Location","id":1}},"extensions":[[536000000,536000000]],"nested":{"Location":{"fields":{"path":{"rule":"repeated","type":"int32","id":1,"options":{"packed":true}},"span":{"rule":"repeated","type":"int32","id":2,"options":{"packed":true}},"leadingComments":{"type":"string","id":3},"trailingComments":{"type":"string","id":4},"leadingDetachedComments":{"rule":"repeated","type":"string","id":6}}}}},"GeneratedCodeInfo":{"edition":"proto2","fields":{"annotation":{"rule":"repeated","type":"Annotation","id":1}},"nested":{"Annotation":{"fields":{"path":{"rule":"repeated","type":"int32","id":1,"options":{"packed":true}},"sourceFile":{"type":"string","id":2},"begin":{"type":"int32","id":3},"end":{"type":"int32","id":4},"semantic":{"type":"Semantic","id":5}},"nested":{"Semantic":{"values":{"NONE":0,"SET":1,"ALIAS":2}}}}}},"SymbolVisibility":{"edition":"proto2","values":{"VISIBILITY_UNSET":0,"VISIBILITY_LOCAL":1,"VISIBILITY_EXPORT":2}}}}}}}}');
 
 /***/ }),
 
@@ -131360,7 +133010,7 @@ module.exports = /*#__PURE__*/JSON.parse('{"nested":{"google":{"nested":{"protob
 /***/ ((module) => {
 
 "use strict";
-module.exports = {"rE":"1.16.0"};
+module.exports = {"rE":"1.17.0"};
 
 /***/ })
 

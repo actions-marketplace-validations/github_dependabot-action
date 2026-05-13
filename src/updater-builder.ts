@@ -46,12 +46,30 @@ export class UpdaterBuilder {
       `UPDATER_ONE_CONTAINER=1`,
       `ENABLE_CONNECTIVITY_CHECK=${
         process.env.DEPENDABOT_ENABLE_CONNECTIVITY_CHECK || '1'
-      }`
+      }`,
+      // Increase V8 heap size from the default ~2GB to 4GB.
+      // The container memory limit (UPDATER_MAX_MEMORY) is 8GB, but Node.js
+      // auto-scaling caps V8 heap at ~2GB for containers above 4GB.
+      // This is insufficient for large pnpm/npm monorepos (100+ workspace
+      // packages) where lockfile regeneration requires more heap.
+      // 4GB is half the container limit, leaving room for Ruby and other processes.
+      // See: https://github.com/dependabot/dependabot-core/issues/14596
+      `NODE_OPTIONS=--max-old-space-size=4096`
     ]
 
     // Add DEPENDABOT_UPDATER_SHA if we successfully extracted a SHA
     if (updaterSha !== null) {
       envVars.push(`DEPENDABOT_UPDATER_SHA=${updaterSha}`)
+    }
+
+    // Pass through OPENSSL_FORCE_FIPS_MODE from the host if set.
+    // The container does not have the OpenSSL FIPS provider installed, so OpenSSL fails while running update-ca-certificates on FIPS-enabled self-hosted runners.
+    // Setting OPENSSL_FORCE_FIPS_MODE=0 on the host works around this by explicitly preventing OpenSSL from using FIPS.
+    // We only propagate the env variable when it is explicitly set so as not to alter default behavior.
+    if (process.env.OPENSSL_FORCE_FIPS_MODE !== undefined) {
+      envVars.push(
+        `OPENSSL_FORCE_FIPS_MODE=${process.env.OPENSSL_FORCE_FIPS_MODE}`
+      )
     }
 
     const container = await this.docker.createContainer({

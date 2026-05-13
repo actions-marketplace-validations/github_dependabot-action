@@ -409,7 +409,7 @@ describe('run', () => {
     })
   })
 
-  describe('when there is an error pulling images', () => {
+  describe('when there is an error pulling all images', () => {
     beforeEach(() => {
       jest
         .spyOn(ImageService, 'pull')
@@ -418,9 +418,18 @@ describe('run', () => {
             Promise.reject(new Error('error pulling an image'))
           )
         )
+        .mockImplementationOnce(
+          // when calling Azure
+          jest.fn(async () =>
+            Promise.reject(new Error('error pulling an image'))
+          )
+        )
       jest.spyOn(ApiClient.prototype, 'getJobDetails').mockImplementationOnce(
         jest.fn(async () => {
-          return {'package-manager': 'npm_and_yarn'} as JobDetails
+          return {
+            'package-manager': 'npm_and_yarn',
+            experiments: {'azure-registry-backup': true}
+          } as JobDetails
         })
       )
       context = new Context()
@@ -444,6 +453,36 @@ describe('run', () => {
         }
       })
       expect(markJobAsProcessedSpy).toHaveBeenCalled()
+    })
+  })
+
+  describe('when there is an error pulling first images', () => {
+    beforeEach(() => {
+      jest
+        .spyOn(ImageService, 'pull')
+        .mockImplementationOnce(
+          jest.fn(async () =>
+            Promise.reject(new Error('error pulling an image'))
+          )
+        )
+      jest.spyOn(ApiClient.prototype, 'getJobDetails').mockImplementationOnce(
+        jest.fn(async () => {
+          return {
+            'package-manager': 'npm_and_yarn',
+            experiments: {'azure-registry-backup': true}
+          } as JobDetails
+        })
+      )
+      context = new Context()
+    })
+
+    test('it succeeds the workflow', async () => {
+      await run(context)
+
+      expect(core.setFailed).not.toHaveBeenCalled()
+      expect(core.info).toHaveBeenCalledWith(
+        expect.stringContaining('🤖 ~ finished ~')
+      )
     })
   })
 
@@ -915,6 +954,72 @@ describe('getPackagesCredential', () => {
     })
   })
 
+  describe('when the package manager is docker_compose', () => {
+    describe('when automatic package auth is enabled', () => {
+      it('creates a GitHub packages credential', () => {
+        const details = createJobDetails('docker_compose', {
+          [experimentName]: true
+        })
+        const cred = getPackagesCredential(details, 'test-actor')
+        expect(cred).toEqual({
+          type: 'docker_registry',
+          registry: 'ghcr.io',
+          username: 'test-actor',
+          password: 'test-token'
+        })
+      })
+
+      it('does not create a duplicate credential', () => {
+        const existingCred: Credential = {
+          type: 'docker_registry',
+          registry: 'ghcr.io',
+          username: 'some-other-actor',
+          password: 'some-other-token'
+        }
+        const details = createJobDetails(
+          'docker_compose',
+          {[experimentName]: true},
+          [existingCred]
+        )
+        const cred = getPackagesCredential(details, 'test-actor')
+        expect(cred).toBeNull()
+      })
+    })
+  })
+
+  describe('when the package manager is devcontainers', () => {
+    describe('when automatic package auth is enabled', () => {
+      it('creates a GitHub packages credential', () => {
+        const details = createJobDetails('devcontainers', {
+          [experimentName]: true
+        })
+        const cred = getPackagesCredential(details, 'test-actor')
+        expect(cred).toEqual({
+          type: 'docker_registry',
+          registry: 'ghcr.io',
+          username: 'test-actor',
+          password: 'test-token'
+        })
+      })
+
+      it('does not create a duplicate credential', () => {
+        const existingCred: Credential = {
+          type: 'docker_registry',
+          registry: 'ghcr.io',
+          username: 'some-other-actor',
+          password: 'some-other-token'
+        }
+        const details = createJobDetails(
+          'devcontainers',
+          {[experimentName]: true},
+          [existingCred]
+        )
+        const cred = getPackagesCredential(details, 'test-actor')
+        expect(cred).toBeNull()
+      })
+    })
+  })
+
   describe('when the package manager is maven', () => {
     describe('when automatic package auth is enabled', () => {
       it('creates a GitHub packages credential', () => {
@@ -958,6 +1063,35 @@ describe('getPackagesCredential', () => {
     })
   })
 
+  describe('when the package manager is gradle', () => {
+    describe('when automatic package auth is enabled', () => {
+      it('creates a GitHub packages credential', () => {
+        const details = createJobDetails('gradle', {[experimentName]: true})
+        const cred = getPackagesCredential(details, 'test-actor')
+        expect(cred).toEqual({
+          type: 'maven_repository',
+          url: 'https://maven.pkg.github.com/test-org',
+          username: 'test-actor',
+          password: 'test-token'
+        })
+      })
+
+      it('does not create a duplicate credential', () => {
+        const existingCred: Credential = {
+          type: 'maven_repository',
+          url: 'https://maven.pkg.github.com/TEST-ORG',
+          username: 'some-other-actor',
+          password: 'some-other-token'
+        }
+        const details = createJobDetails('gradle', {[experimentName]: true}, [
+          existingCred
+        ])
+        const cred = getPackagesCredential(details, 'test-actor')
+        expect(cred).toBeNull()
+      })
+    })
+  })
+
   describe('when the package manager is npm_and_yarn', () => {
     describe('when automatic package auth is enabled', () => {
       it('creates a GitHub packages credential', () => {
@@ -983,6 +1117,33 @@ describe('getPackagesCredential', () => {
           {[experimentName]: true},
           [existingCred]
         )
+        const cred = getPackagesCredential(details, 'test-actor')
+        expect(cred).toBeNull()
+      })
+    })
+  })
+
+  describe('when the package manager is bun', () => {
+    describe('when automatic package auth is enabled', () => {
+      it('creates a GitHub packages credential', () => {
+        const details = createJobDetails('bun', {[experimentName]: true})
+        const cred = getPackagesCredential(details, 'test-actor')
+        expect(cred).toEqual({
+          type: 'npm_registry',
+          registry: 'npm.pkg.github.com',
+          token: 'test-actor:test-token'
+        })
+      })
+
+      it('does not create a duplicate credential', () => {
+        const existingCred: Credential = {
+          type: 'npm_registry',
+          registry: 'npm.pkg.github.com',
+          token: 'some-other-actor:some-other-token'
+        }
+        const details = createJobDetails('bun', {[experimentName]: true}, [
+          existingCred
+        ])
         const cred = getPackagesCredential(details, 'test-actor')
         expect(cred).toBeNull()
       })

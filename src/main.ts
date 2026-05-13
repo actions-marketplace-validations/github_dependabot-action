@@ -1,16 +1,16 @@
 import * as core from '@actions/core'
 import * as github from '@actions/github'
-import * as httpClient from '@actions/http-client'
 import {Context} from '@actions/github/lib/context'
+import * as httpClient from '@actions/http-client'
 import {
   ApiClient,
   Credential,
   CredentialFetchingError,
   JobDetails
 } from './api-client'
-import {getJobParameters} from './inputs'
+import {PROXY_IMAGE_NAME, updaterImageName} from './docker-tags'
 import {ImageService, MetricReporter} from './image-service'
-import {updaterImageName, PROXY_IMAGE_NAME} from './docker-tags'
+import {getJobParameters} from './inputs'
 import {Updater} from './updater'
 
 export enum DependabotErrorType {
@@ -18,6 +18,11 @@ export enum DependabotErrorType {
   Image = 'actions_workflow_image',
   UpdateRun = 'actions_workflow_updater'
 }
+
+const FALLBACK_CONTAINER_REGISTRY =
+  'dependabot-acr-apim-production.azure-api.net'
+const FEATURE_DISABLE_GHCR_PULL = 'disable-ghcr-pull'
+const FEATURE_PULL_FROM_AZURE = 'azure-registry-backup'
 
 let jobId: number
 
@@ -70,8 +75,9 @@ export async function run(context: Context): Promise<void> {
     const details = await apiClient.getJobDetails()
 
     // The dynamic workflow can specify which updater image to use. If it doesn't, fall back to the pinned version.
-    const updaterImage =
+    let updaterImage =
       params.updaterImage || updaterImageName(details['package-manager'])
+    let proxyImage = PROXY_IMAGE_NAME
 
     // The sendMetrics function is used to send metrics to the API client.
     // It uses the package manager as a tag to identify the metric.
@@ -105,35 +111,63 @@ export async function run(context: Context): Promise<void> {
         credentials.push(packagesCred)
       }
 
-      const updater = new Updater(
-        updaterImage,
-        PROXY_IMAGE_NAME,
-        apiClient,
-        details,
-        credentials
-      )
-
       core.startGroup('Pulling updater images')
-      try {
-        // Using sendMetricsWithPackageManager wrapper to inject package manager tag ti
-        // avoid passing additional parameters to ImageService.pull method
-        await ImageService.pull(updaterImage, sendMetricsWithPackageManager)
-        await ImageService.pull(PROXY_IMAGE_NAME, sendMetricsWithPackageManager)
-      } catch (error: unknown) {
-        if (error instanceof Error) {
-          await failJob(
-            apiClient,
-            'Error fetching updater images',
-            error,
-            DependabotErrorType.Image
-          )
-          return
+      let imagesPulled = false
+      let pullError: Error = new Error('No image source was configured')
+      const experiments =
+        (details?.experiments as {[key: string]: boolean}) || {}
+
+      if (experiments[FEATURE_DISABLE_GHCR_PULL] !== true) {
+        try {
+          // Using sendMetricsWithPackageManager wrapper to inject package manager tag to
+          // avoid passing additional parameters to ImageService.pull method
+          await ImageService.pull(updaterImage, sendMetricsWithPackageManager)
+          await ImageService.pull(proxyImage, sendMetricsWithPackageManager)
+          imagesPulled = true
+        } catch (error: unknown) {
+          if (error instanceof Error) {
+            pullError = error
+          }
         }
       }
+
+      if (!imagesPulled && experiments[FEATURE_PULL_FROM_AZURE]) {
+        core.warning('Primary image pull failed, attempting fallback')
+        updaterImage = `${FALLBACK_CONTAINER_REGISTRY}/${updaterImage}`
+        proxyImage = `${FALLBACK_CONTAINER_REGISTRY}/${proxyImage}`
+        try {
+          await ImageService.pull(updaterImage, sendMetricsWithPackageManager)
+          await ImageService.pull(proxyImage, sendMetricsWithPackageManager)
+          imagesPulled = true
+        } catch (error: unknown) {
+          if (error instanceof Error) {
+            pullError = error
+          }
+        }
+      }
+
+      if (!imagesPulled) {
+        await failJob(
+          apiClient,
+          'Error fetching updater images',
+          pullError,
+          DependabotErrorType.Image
+        )
+        return
+      }
+
       core.endGroup()
 
       try {
         core.info('Starting update process')
+
+        const updater = new Updater(
+          updaterImage,
+          proxyImage,
+          apiClient,
+          details,
+          credentials
+        )
 
         await updater.runUpdater()
       } catch (error: unknown) {
@@ -209,11 +243,15 @@ export function getPackagesCredential(
       credential = getRubyGemsPackagesCredential(jobDetails, actor, githubToken)
       break
     case 'docker':
+    case 'docker_compose':
+    case 'devcontainers':
       credential = getDockerPackagesCredential(jobDetails, actor, githubToken)
       break
     case 'maven':
+    case 'gradle':
       credential = getMavenPackagesCredential(jobDetails, actor, githubToken)
       break
+    case 'bun':
     case 'npm_and_yarn':
       credential = getNpmPackagesCredential(jobDetails, actor, githubToken)
       break
