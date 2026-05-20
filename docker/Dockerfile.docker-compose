@@ -1,1 +1,1 @@
-FROM ghcr.io/dependabot/dependabot-updater-docker-compose:v2.0.20260520174846@sha256:6983a8991d0f2cd55c0b271f1cd59c1984f5282dff2608d04a0a5d07edad24d3
+FROM ghcr.io/dependabot/dependabot-updater-docker-compose:v2.0.20260520210800@sha256:a347d488433b81b3f529c618da92b59a35947a94a4a9672ac7fb49ac4dc56310
