@@ -1,1 +1,1 @@
-FROM ghcr.io/dependabot/dependabot-updater-github-actions:v2.0.20260523194404@sha256:2e96514b944f07c0a1fd6e1131f61a7eca51825133550c6d1cbcb1543fc39a40
+FROM ghcr.io/dependabot/dependabot-updater-github-actions:v2.0.20260607215545@sha256:9bf5f889505a1ae43d2774e8a4de2871f3e7279822a97f36ca790b44a114cc3e
