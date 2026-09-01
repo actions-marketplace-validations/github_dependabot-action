@@ -1,3 +1,4 @@
+import * as core from '@actions/core'
 import Docker, {Container} from 'dockerode'
 import {JobDetails, ApiClient, Credential} from './api-client'
 import {ContainerService} from './container-service'
@@ -23,13 +24,12 @@ export class Updater {
    * Execute an update job and report the result to Dependabot API.
    */
   async runUpdater(): Promise<boolean> {
-    const cachedMode =
-      this.details.experiments?.hasOwnProperty('proxy-cached') === true
+    const experiments = this.details.experiments ?? {}
 
     const proxyBuilder = new ProxyBuilder(
       this.docker,
       this.proxyImage,
-      cachedMode
+      experiments
     )
 
     const proxy = await proxyBuilder.run(
@@ -41,11 +41,27 @@ export class Updater {
     await proxy.container.start()
 
     try {
+      await proxy.waitUntilReady()
       await this.runUpdate(proxy)
-      return true
-    } finally {
-      await this.cleanup(proxy)
+    } catch (error) {
+      try {
+        await this.cleanup(proxy)
+      } catch (cleanupError) {
+        const cleanupErrors =
+          cleanupError instanceof AggregateError
+            ? cleanupError.errors
+            : [cleanupError]
+        for (const cleanupFailure of cleanupErrors) {
+          core.info(
+            `Failed to clean up proxy after update failure: ${cleanupFailure}`
+          )
+        }
+      }
+      throw error
     }
+
+    await this.cleanup(proxy)
+    return true
   }
 
   private generateCredentialsMetadata(): Credential[] {
@@ -79,6 +95,9 @@ export class Updater {
       }
       if (credential['replaces-base'] !== undefined) {
         obj['replaces-base'] = credential['replaces-base']
+      }
+      if (credential.scope !== undefined) {
+        obj.scope = credential.scope
       }
       if (credential['public-key-fingerprint'] !== undefined) {
         obj['public-key-fingerprint'] = credential['public-key-fingerprint']

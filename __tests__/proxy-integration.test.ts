@@ -22,8 +22,7 @@ integration('ProxyBuilder', () => {
     }
   ]
 
-  const cachedMode = true
-  const builder = new ProxyBuilder(docker, PROXY_IMAGE_NAME, cachedMode)
+  const builder = new ProxyBuilder(docker, PROXY_IMAGE_NAME)
 
   beforeAll(async () => {
     await ImageService.pull(PROXY_IMAGE_NAME)
@@ -42,6 +41,7 @@ integration('ProxyBuilder', () => {
       credentials
     )
     await proxy.container.start()
+    await proxy.waitUntilReady()
 
     const containerInfo = await proxy.container.inspect()
     expect(containerInfo.Name).toBe('/dependabot-job-1-proxy')
